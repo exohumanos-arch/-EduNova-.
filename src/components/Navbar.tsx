@@ -1,6 +1,6 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Bell, Calendar, Menu, Settings, Sparkles } from 'lucide-react';
+import { Bell, Calendar, LogOut, Menu, Settings, ShieldCheck, Sparkles, GraduationCap } from 'lucide-react';
 import type { AuthUser, DashboardPayload } from '../types';
 import { SearchBar } from './SearchBar';
 import { StudentAvatar } from './StudentAvatar';
@@ -13,6 +13,7 @@ interface NavbarProps {
   dashboard: DashboardPayload | null;
   onOpenMobileMenu: () => void;
   onOpenAiDrawer: () => void;
+  onLogout?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -21,7 +22,9 @@ export const Navbar: React.FC<NavbarProps> = ({
   dashboard,
   onOpenMobileMenu,
   onOpenAiDrawer,
+  onLogout,
 }) => {
+  const isAdmin = user.role === 'ADMIN';
   const navigate = useNavigate();
   const [searchQuery, setSearchQuery] = useState('');
   const [searchFocused, setSearchFocused] = useState(false);
@@ -51,8 +54,8 @@ export const Navbar: React.FC<NavbarProps> = ({
       )
       .slice(0, 5);
 
-    const pages = SIDEBAR_NAV_ITEMS.filter((p) =>
-      p.label.toLowerCase().includes(q)
+    const pages = SIDEBAR_NAV_ITEMS.filter(
+      (p) => (!p.adminOnly || isAdmin) && p.label.toLowerCase().includes(q)
     ).slice(0, 4);
 
     return { students, pages };
@@ -188,17 +191,49 @@ export const Navbar: React.FC<NavbarProps> = ({
           />
         </div>
 
-        <Link
-          to="/settings"
-          title="System Settings"
-          className="flex items-center gap-2 rounded-xl border border-[#ECEBF3] bg-[#F7F7FC] pl-1.5 pr-2.5 py-1 hover:border-[#7357E8]/40 hover:bg-[#EEE9FF]/50 transition-colors"
+        <div
+          aria-label="Current role"
+          className="inline-flex items-center gap-1.5 rounded-xl border border-[#ECEBF3] bg-[#F7F7FC] px-2.5 py-1.5 text-xs font-semibold text-[#4935A8]"
         >
-          <StudentAvatar name={user.username} size="sm" />
-          <span className="hidden sm:inline-flex items-center gap-1 text-xs font-semibold text-[#4935A8]">
-            <Settings className="w-3.5 h-3.5 text-[#7357E8]" />
-            Settings
-          </span>
-        </Link>
+          {isAdmin ? (
+            <ShieldCheck className="w-3.5 h-3.5 text-[#7357E8]" />
+          ) : (
+            <GraduationCap className="w-3.5 h-3.5 text-[#7357E8]" />
+          )}
+          <span>{isAdmin ? 'Admin' : 'Teacher'}</span>
+        </div>
+
+        {isAdmin ? (
+          <Link
+            to="/settings"
+            title="System Settings"
+            className="flex items-center gap-2 rounded-xl border border-[#ECEBF3] bg-[#F7F7FC] pl-1.5 pr-2.5 py-1 hover:border-[#7357E8]/40 hover:bg-[#EEE9FF]/50 transition-colors"
+          >
+            <StudentAvatar name={user.username} size="sm" />
+            <span className="hidden sm:inline-flex items-center gap-1 text-xs font-semibold text-[#4935A8]">
+              <Settings className="w-3.5 h-3.5 text-[#7357E8]" />
+              Settings
+            </span>
+          </Link>
+        ) : (
+          <div className="flex items-center gap-2 rounded-xl border border-[#ECEBF3] bg-[#F7F7FC] pl-1.5 pr-2.5 py-1">
+            <StudentAvatar name={user.username} size="sm" />
+            <span className="hidden sm:inline text-xs font-semibold text-[#24243A]">
+              {user.username}
+            </span>
+          </div>
+        )}
+
+        {onLogout && (
+          <button
+            type="button"
+            onClick={onLogout}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-[#ECEBF3] bg-white px-3 py-1.5 text-xs font-semibold text-[#24243A] hover:bg-[#FDECEC] hover:border-[#EF6262]/30 hover:text-[#C23E3E] transition-colors"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Logout</span>
+          </button>
+        )}
       </div>
     </header>
   );
