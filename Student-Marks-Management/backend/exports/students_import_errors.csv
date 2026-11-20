@@ -1,0 +1,2 @@
+error_number,detail
+1,"Missing required CSV header(s): course, branch, semester"

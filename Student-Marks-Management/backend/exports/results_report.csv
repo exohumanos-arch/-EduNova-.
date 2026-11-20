@@ -1,0 +1,11 @@
+roll_no,name,branch,semester,total_obtained,total_maximum,percentage,grade,status,failed_subjects
+2026001,Rahul Sharma,CSE,3,445,500,89,A,PASS,
+2026002,Ananya Iyer,CSE,3,469,500,93.8,A+,PASS,
+2026003,Aditya Deshmukh,AIML,3,409,500,81.8,A,PASS,
+2026004,Priya Menon,CSE,3,380,500,76,B,PASS,
+2026005,Rohan Kulkarni,AIML,3,300,500,60,F,FAIL,Engineering Mathematics III
+2026006,Ishita Sengupta,ECE,3,428,500,85.6,A,PASS,
+2026007,Vikramaditya Rao,CSE,3,281,500,56.2,D,PASS,
+2026008,Sneha Choudhary,ECE,3,309,500,61.8,F,FAIL,Data Structures & Algorithms
+2026009,Karan Malhotra,AIML,3,443,500,88.6,A,PASS,
+2026010,Divya Krishnan,CSE,3,395,500,79,B,PASS,

@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Poppins", system-ui, sans-serif;
+  --font-sans: "DM Sans", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --color-edunova-purple: #7357E8;
+  --color-edunova-dark: #4935A8;
+  --color-edunova-light: #EEE9FF;
+  --color-edunova-bg: #F7F7FC;
+  --color-edunova-ink: #24243A;
+  --color-edunova-muted: #85859B;
+  --color-edunova-success: #39B980;
+  --color-edunova-warning: #F4A340;
+  --color-edunova-danger: #EF6262;
+  --color-edunova-border: #ECEBF3;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    color: #24243A;
+    background-color: #F7F7FC;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: var(--font-display);
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer utilities {
+  .edunova-card {
+    background-color: #FFFFFF;
+    border: 1px solid #ECEBF3;
+    border-radius: 20px;
+    box-shadow: 0 4px 20px rgba(36, 36, 58, 0.035);
+  }
+}
+
+@media print {
+  aside,
+  header,
+  nav,
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: #FFFFFF !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

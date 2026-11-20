@@ -1,0 +1,8 @@
+{
+  "name": "Remix AcadLedger — Student Marks Management System",
+  "description": "Full-stack Student Marks Management System with Python data structures, SQL persistence, CSV file processing, interactive 3D academic analytics, and Gemini-powered academic intelligence.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
