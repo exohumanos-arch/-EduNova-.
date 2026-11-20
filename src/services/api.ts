@@ -1,7 +1,5 @@
 import axios from 'axios';
 import type {
-  AccessCodeStatus,
-  AuthUser,
   CohortAIInsights,
   DashboardPayload,
   Examination,
@@ -12,68 +10,14 @@ import type {
   Subject,
 } from '../types';
 
-const SESSION_TOKEN_KEY = 'edunova_session_token';
-
-export function getStoredSessionToken(): string | null {
-  try {
-    return typeof window !== 'undefined' ? window.sessionStorage.getItem(SESSION_TOKEN_KEY) : null;
-  } catch {
-    return null;
-  }
-}
-
-export function setStoredSessionToken(token: string | null) {
-  try {
-    if (typeof window === 'undefined') return;
-    if (token) {
-      window.sessionStorage.setItem(SESSION_TOKEN_KEY, token);
-    } else {
-      window.sessionStorage.removeItem(SESSION_TOKEN_KEY);
-    }
-  } catch {
-    // Ignore storage restriction errors in sandboxed contexts
-  }
-}
-
-let unauthorizedHandler: (() => void) | null = null;
-
-export function setUnauthorizedHandler(handler: (() => void) | null) {
-  unauthorizedHandler = handler;
-}
-
 export const http = axios.create({
   baseURL: '',
-  withCredentials: true,
   timeout: 30000,
-});
-
-http.interceptors.request.use((config) => {
-  const token = getStoredSessionToken();
-  if (token) {
-    config.headers = config.headers ?? {};
-    if (!config.headers.Authorization) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-  }
-  return config;
 });
 
 http.interceptors.response.use(
   (response) => response,
   (error) => {
-    const status = error?.response?.status;
-    const url = String(error?.config?.url || '');
-    if (
-      status === 401 &&
-      !url.includes('/api/auth/code-login') &&
-      !url.includes('/api/auth/me') &&
-      !url.includes('/api/auth/logout')
-    ) {
-      setStoredSessionToken(null);
-      if (unauthorizedHandler) {
-        unauthorizedHandler();
-      }
-    }
     const msg =
       error?.response?.data?.error ||
       error?.response?.data?.detail ||
@@ -95,68 +39,6 @@ function triggerBlobDownload(blob: Blob, filename: string) {
 }
 
 export const api = {
-  // Role-Based Access Code Auth (HttpOnly Cookie + Server-Tracked Session Token)
-  codeLogin: async (role: 'admin' | 'teacher', access_code: string) => {
-    const data = (
-      await http.post<{
-        authenticated: boolean;
-        role: 'ADMIN' | 'TEACHER';
-        user: AuthUser;
-        session_token?: string;
-        expires_at?: string;
-      }>('/api/auth/code-login', { role, access_code })
-    ).data;
-    if (data.session_token) {
-      setStoredSessionToken(data.session_token);
-    }
-    return data;
-  },
-  logout: async () => {
-    try {
-      return (await http.post<{ logged_out: boolean }>('/api/auth/logout')).data;
-    } finally {
-      setStoredSessionToken(null);
-    }
-  },
-  refresh: async () => {
-    const data = (
-      await http.post<{
-        refreshed: boolean;
-        role: 'ADMIN' | 'TEACHER';
-        user: AuthUser;
-        session_token?: string;
-        expires_at?: string;
-      }>('/api/auth/refresh')
-    ).data;
-    if (data.session_token) {
-      setStoredSessionToken(data.session_token);
-    }
-    return data;
-  },
-  me: async () =>
-    (
-      await http.get<{
-        authenticated: boolean;
-        role: 'ADMIN' | 'TEACHER';
-        user: AuthUser;
-        expires_at?: string;
-      }>('/api/auth/me')
-    ).data,
-
-  // Admin Access Code Configuration
-  getAccessCodeStatus: async () =>
-    (await http.get<AccessCodeStatus>('/api/admin/access-codes')).data,
-  updateAccessCode: async (payload: {
-    target_role: 'TEACHER' | 'ADMIN';
-    new_code: string;
-    current_admin_code?: string;
-  }) =>
-    (
-      await http.put<{ updated: boolean; target_role: 'TEACHER' | 'ADMIN'; updated_at: string }>(
-        '/api/admin/access-codes',
-        payload
-      )
-    ).data,
   getAdminDbHealth: async () =>
     (await http.get<Record<string, unknown>>('/api/admin/db-health')).data,
 

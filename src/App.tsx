@@ -5,17 +5,14 @@ import {
   Route,
   Routes,
   useLocation,
-  useNavigate,
 } from 'react-router-dom';
 import { X } from 'lucide-react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { api } from './services/api';
 import type { AuthUser, DashboardPayload, Examination } from './types';
-import { LoginView } from './components/LoginView';
 import { Sidebar, SIDEBAR_NAV_ITEMS } from './components/Sidebar';
 import { Navbar } from './components/Navbar';
 import { MobileBottomNav } from './components/MobileBottomNav';
-import { ProtectedRoute } from './components/ProtectedRoute';
 import { AcademicObservatory3D } from './components/AcademicObservatory3D';
 import { AIChatPanel } from './components/AIChatPanel';
 import { DashboardPage } from './pages/DashboardPage';
@@ -42,7 +39,6 @@ function resolvePageTitle(pathname: string): string {
 
 interface WorkspaceShellProps {
   user: AuthUser;
-  onLogout: () => void;
   examinations: Examination[];
   selectedExamId: number;
   onSelectExam: (id: number) => void;
@@ -53,7 +49,6 @@ interface WorkspaceShellProps {
 
 const WorkspaceShell: React.FC<WorkspaceShellProps> = ({
   user,
-  onLogout,
   examinations,
   selectedExamId,
   onSelectExam,
@@ -74,7 +69,6 @@ const WorkspaceShell: React.FC<WorkspaceShellProps> = ({
         user={user}
         mobileMenuOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
-        onLogout={onLogout}
       />
 
       <div className="flex-1 flex flex-col min-w-0">
@@ -84,7 +78,6 @@ const WorkspaceShell: React.FC<WorkspaceShellProps> = ({
           dashboard={dashboard}
           onOpenMobileMenu={() => setMobileMenuOpen(true)}
           onOpenAiDrawer={() => setAiDrawerOpen(true)}
-          onLogout={onLogout}
         />
 
         <main
@@ -129,19 +122,11 @@ const WorkspaceShell: React.FC<WorkspaceShellProps> = ({
             />
             <Route
               path="/students/add"
-              element={
-                <ProtectedRoute user={user} requireAdmin>
-                  <StudentFormPage onDataChanged={onDataChanged} onNotify={onNotify} />
-                </ProtectedRoute>
-              }
+              element={<StudentFormPage onDataChanged={onDataChanged} onNotify={onNotify} />}
             />
             <Route
               path="/students/:id/edit"
-              element={
-                <ProtectedRoute user={user} requireAdmin>
-                  <StudentFormPage onDataChanged={onDataChanged} onNotify={onNotify} />
-                </ProtectedRoute>
-              }
+              element={<StudentFormPage onDataChanged={onDataChanged} onNotify={onNotify} />}
             />
             <Route
               path="/students/:id"
@@ -238,14 +223,8 @@ const WorkspaceShell: React.FC<WorkspaceShellProps> = ({
             />
             <Route path="/ai-advisor" element={<AIChatPanel examId={selectedExamId} />} />
             <Route path="/python-inspector" element={<PythonInspectorPage />} />
-            <Route
-              path="/settings"
-              element={
-                <ProtectedRoute user={user} requireAdmin>
-                  <SettingsPage currentUser={user} onNotify={onNotify} onLogout={onLogout} />
-                </ProtectedRoute>
-              }
-            />
+            <Route path="/settings" element={<SettingsPage currentUser={user} />} />
+            <Route path="/login" element={<Navigate to="/dashboard" replace />} />
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
@@ -281,8 +260,7 @@ const WorkspaceShell: React.FC<WorkspaceShellProps> = ({
 };
 
 const AppRoutes: React.FC = () => {
-  const navigate = useNavigate();
-  const { user, authChecking, sessionExpiredMessage, loginWithCode, logout } = useAuth();
+  const { user } = useAuth();
 
   const [examinations, setExaminations] = useState<Examination[]>([]);
   const [selectedExamId, setSelectedExamId] = useState<number>(2);
@@ -318,64 +296,20 @@ const AppRoutes: React.FC = () => {
   );
 
   useEffect(() => {
-    if (user) {
-      loadWorkspaceData(selectedExamId);
-    } else {
-      setDashboard(null);
-    }
-  }, [user, selectedExamId]);
-
-  const handleLogout = async () => {
-    await logout();
-    setDashboard(null);
-    navigate('/login', { replace: true });
-  };
-
-  if (authChecking) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-[#F7F7FC] text-sm text-[#85859B]">
-        Verifying EduNova session...
-      </div>
-    );
-  }
+    loadWorkspaceData(selectedExamId);
+  }, [selectedExamId]);
 
   return (
     <>
-      <Routes>
-        <Route
-          path="/login"
-          element={
-            user ? (
-              <Navigate to="/dashboard" replace />
-            ) : (
-              <LoginView
-                onLogin={loginWithCode}
-                sessionExpiredMessage={sessionExpiredMessage}
-                onSuccess={() => navigate('/dashboard', { replace: true })}
-              />
-            )
-          }
-        />
-        <Route
-          path="/*"
-          element={
-            <ProtectedRoute user={user}>
-              {user && (
-                <WorkspaceShell
-                  user={user}
-                  onLogout={handleLogout}
-                  examinations={examinations}
-                  selectedExamId={selectedExamId}
-                  onSelectExam={(id) => setSelectedExamId(id)}
-                  dashboard={dashboard}
-                  onDataChanged={() => loadWorkspaceData(selectedExamId)}
-                  onNotify={notify}
-                />
-              )}
-            </ProtectedRoute>
-          }
-        />
-      </Routes>
+      <WorkspaceShell
+        user={user}
+        examinations={examinations}
+        selectedExamId={selectedExamId}
+        onSelectExam={(id) => setSelectedExamId(id)}
+        dashboard={dashboard}
+        onDataChanged={() => loadWorkspaceData(selectedExamId)}
+        onNotify={notify}
+      />
 
       {toast && (
         <div
