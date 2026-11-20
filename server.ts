@@ -481,14 +481,45 @@ function extractSessionToken(req: Request): string | null {
   return null;
 }
 
-function authenticateToken(req: AuthRequest, _res: Response, next: NextFunction) {
+function authenticateToken(req: AuthRequest, res: Response, next: NextFunction) {
+  const rawToken = extractSessionToken(req);
+  if (!rawToken) {
+    res.status(401).json({ error: 'Authentication session required' });
+    return;
+  }
+
+  const payload = verifySessionToken(rawToken);
+  if (!payload) {
+    clearSessionCookie(req, res);
+    res.status(401).json({ error: 'Session expired or invalid' });
+    return;
+  }
+
+  const sessionRow = db
+    .prepare('SELECT sid, role, username, expires_at, revoked FROM auth_sessions WHERE sid = ?')
+    .get(payload.sid) as
+    | { sid: string; role: 'ADMIN' | 'TEACHER'; username: string; expires_at: number; revoked: number }
+    | undefined;
+
+  if (!sessionRow || sessionRow.revoked === 1 || Date.now() >= sessionRow.expires_at) {
+    clearSessionCookie(req, res);
+    res.status(401).json({ error: 'Session expired or terminated' });
+    return;
+  }
+
+  if (sessionRow.role !== payload.role) {
+    clearSessionCookie(req, res);
+    res.status(401).json({ error: 'Invalid session role state' });
+    return;
+  }
+
   req.user = {
-    id: 1,
-    username: 'Administrator',
-    role: 'ADMIN',
+    id: sessionRow.role === 'ADMIN' ? 1 : 2,
+    username: sessionRow.username,
+    role: sessionRow.role,
   };
-  req.sessionId = 'open-workspace';
-  req.sessionExpiresAt = Date.now() + SESSION_TTL_MS;
+  req.sessionId = sessionRow.sid;
+  req.sessionExpiresAt = sessionRow.expires_at;
   next();
 }
 

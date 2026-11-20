@@ -1,9 +1,11 @@
 import '@testing-library/jest-dom/vitest';
 import React from 'react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider, useAuth } from '../context/AuthContext';
+import { LoginView } from '../components/LoginView';
+import { ProtectedRoute } from '../components/ProtectedRoute';
 import { Sidebar } from '../components/Sidebar';
 import { Navbar } from '../components/Navbar';
 import { MobileBottomNav } from '../components/MobileBottomNav';
@@ -30,6 +32,12 @@ vi.mock('../services/api', async (importOriginal) => {
     ...actual,
     api: {
       ...actual.api,
+      codeLogin: vi.fn(),
+      logout: vi.fn(),
+      me: vi.fn(),
+      refresh: vi.fn(),
+      getAccessCodeStatus: vi.fn(),
+      updateAccessCode: vi.fn(),
       getAdminDbHealth: vi.fn(),
       getStudents: vi.fn(),
       getSubjects: vi.fn(),
@@ -43,10 +51,16 @@ vi.mock('../services/api', async (importOriginal) => {
   };
 });
 
-const WORKSPACE_USER: AuthUser = {
+const ADMIN_USER: AuthUser = {
   id: 1,
   username: 'Administrator',
   role: 'ADMIN',
+};
+
+const TEACHER_USER: AuthUser = {
+  id: 2,
+  username: 'Teacher',
+  role: 'TEACHER',
 };
 
 const SAMPLE_STUDENTS: Student[] = [
@@ -199,12 +213,59 @@ describe('EduNova Frontend Suite', () => {
     vi.clearAllMocks();
   });
 
-  it('AuthProvider opens directly with full workspace context without login', () => {
+  it('renders RoleSelection + CodeLogin on LoginView, toggles code visibility, and handles valid/invalid codes', async () => {
+    const onSuccess = vi.fn();
+    vi.mocked(api.codeLogin)
+      .mockRejectedValueOnce(new Error('Invalid Admin access code'))
+      .mockResolvedValueOnce({ authenticated: true, role: 'ADMIN', user: ADMIN_USER });
+
+    render(<LoginView onSuccess={onSuccess} />);
+    expect(screen.getByText('Welcome to EduNova')).toBeInTheDocument();
+    expect(screen.getByText('Select your role and enter your access code.')).toBeInTheDocument();
+    expect(screen.getByText('Complete system access.')).toBeInTheDocument();
+    expect(screen.getByText('Academic management access.')).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/email/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Admin/i }));
+    const codeInput = screen.getByLabelText('Admin Access Code') as HTMLInputElement;
+    expect(codeInput.type).toBe('password');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show access code' }));
+    expect(codeInput.type).toBe('text');
+    fireEvent.click(screen.getByRole('button', { name: 'Hide access code' }));
+    expect(codeInput.type).toBe('password');
+
+    fireEvent.change(codeInput, { target: { value: 'WRONG_CODE' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Login' }));
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('Invalid Admin access code');
+    });
+
+    fireEvent.change(codeInput, { target: { value: 'VALID_ADMIN_CODE' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Login' }));
+    await waitFor(() => {
+      expect(api.codeLogin).toHaveBeenLastCalledWith('admin', 'VALID_ADMIN_CODE');
+      expect(onSuccess).toHaveBeenCalledWith(ADMIN_USER);
+    });
+  });
+
+  it('AuthContext restores cookie session, logs in via code, and clears session on logout', async () => {
+    vi.mocked(api.me).mockResolvedValueOnce({
+      authenticated: true,
+      role: 'TEACHER',
+      user: TEACHER_USER,
+    });
+    vi.mocked(api.logout).mockResolvedValueOnce({ logged_out: true });
+
     const Probe: React.FC = () => {
-      const { user, isAuthenticated, authChecking } = useAuth();
+      const { user, authChecking, logout } = useAuth();
+      if (authChecking) return <span>Checking...</span>;
       return (
         <div>
-          <span data-testid="auth-status">{isAuthenticated && !authChecking ? user.role : 'BLOCKED'}</span>
+          <span data-testid="auth-role">{user ? user.role : 'ANON'}</span>
+          <button type="button" onClick={() => logout()}>
+            DoLogout
+          </button>
         </div>
       );
     };
@@ -215,28 +276,94 @@ describe('EduNova Frontend Suite', () => {
       </AuthProvider>
     );
 
-    expect(screen.getByTestId('auth-status')).toHaveTextContent('ADMIN');
+    await waitFor(() => expect(screen.getByTestId('auth-role')).toHaveTextContent('TEACHER'));
+    fireEvent.click(screen.getByText('DoLogout'));
+    await waitFor(() => expect(screen.getByTestId('auth-role')).toHaveTextContent('ANON'));
   });
 
-  it('renders full Sidebar navigation without login or logout controls', () => {
+  it('enforces ProtectedRoute authentication and Admin RBAC redirects', () => {
     render(
-      <MemoryRouter>
-        <Sidebar user={WORKSPACE_USER} mobileMenuOpen={false} onCloseMobile={vi.fn()} />
+      <MemoryRouter initialEntries={['/settings']}>
+        <Routes>
+          <Route path="/login" element={<div>Login Page</div>} />
+          <Route path="/dashboard" element={<div>Dashboard Redirect</div>} />
+          <Route
+            path="/settings"
+            element={
+              <ProtectedRoute user={TEACHER_USER} requireAdmin>
+                <div>Admin Settings</div>
+              </ProtectedRoute>
+            }
+          />
+        </Routes>
       </MemoryRouter>
     );
-    expect(screen.getByText('Dashboard')).toBeInTheDocument();
-    expect(screen.getByText('Students')).toBeInTheDocument();
-    expect(screen.getByText('Marks Management')).toBeInTheDocument();
-    expect(screen.getByText('Settings')).toBeInTheDocument();
-    expect(screen.queryByText('Logout')).not.toBeInTheDocument();
+    expect(screen.getByText('Dashboard Redirect')).toBeInTheDocument();
+
+    render(
+      <MemoryRouter initialEntries={['/dashboard']}>
+        <Routes>
+          <Route path="/login" element={<div>Login Redirect</div>} />
+          <Route
+            path="/dashboard"
+            element={
+              <ProtectedRoute user={null}>
+                <div>Protected Content</div>
+              </ProtectedRoute>
+            }
+          />
+        </Routes>
+      </MemoryRouter>
+    );
+    expect(screen.getByText('Login Redirect')).toBeInTheDocument();
   });
 
-  it('renders Navbar global search, NotificationPanel alerts, and Settings link', () => {
+  it('renders role-specific Sidebar links and Navbar role badge + logout button', () => {
+    const onLogout = vi.fn();
+    const { rerender } = render(
+      <MemoryRouter>
+        <Sidebar user={ADMIN_USER} mobileMenuOpen={false} onCloseMobile={vi.fn()} onLogout={onLogout} />
+      </MemoryRouter>
+    );
+    expect(screen.getByText('Settings')).toBeInTheDocument();
+    expect(screen.queryByText('User Management')).not.toBeInTheDocument();
+    expect(screen.getByText('Admin Portal')).toBeInTheDocument();
+
+    rerender(
+      <MemoryRouter>
+        <Sidebar user={TEACHER_USER} mobileMenuOpen={false} onCloseMobile={vi.fn()} onLogout={onLogout} />
+      </MemoryRouter>
+    );
+    expect(screen.queryByText('Settings')).not.toBeInTheDocument();
+    expect(screen.getByText('Marks Management')).toBeInTheDocument();
+    expect(screen.getByText('Teacher Portal')).toBeInTheDocument();
+
     render(
       <MemoryRouter>
         <Navbar
           pageTitle="Dashboard"
-          user={WORKSPACE_USER}
+          user={TEACHER_USER}
+          dashboard={SAMPLE_DASHBOARD}
+          onOpenMobileMenu={vi.fn()}
+          onOpenAiDrawer={vi.fn()}
+          onLogout={onLogout}
+        />
+      </MemoryRouter>
+    );
+    expect(screen.getByLabelText('Current role')).toHaveTextContent('Teacher');
+    const logoutButtons = screen.getAllByRole('button', { name: 'Logout' });
+    expect(logoutButtons.length).toBeGreaterThanOrEqual(2);
+    fireEvent.click(logoutButtons[0]);
+    fireEvent.click(logoutButtons[1]);
+    expect(onLogout).toHaveBeenCalledTimes(2);
+  });
+
+  it('renders Navbar global search and NotificationPanel academic alerts', () => {
+    render(
+      <MemoryRouter>
+        <Navbar
+          pageTitle="Dashboard"
+          user={ADMIN_USER}
           dashboard={SAMPLE_DASHBOARD}
           onOpenMobileMenu={vi.fn()}
           onOpenAiDrawer={vi.fn()}
@@ -252,7 +379,6 @@ describe('EduNova Frontend Suite', () => {
     fireEvent.click(screen.getByLabelText('Toggle academic alerts'));
     expect(screen.getByText('Academic Alerts')).toBeInTheDocument();
     expect(screen.getByText(/Cohort Leader: Rahul Sharma/i)).toBeInTheDocument();
-    expect(screen.getByText('Settings')).toBeInTheDocument();
   });
 
   it('renders generic DataTable, Pagination, and MobileBottomNav', () => {
@@ -275,7 +401,7 @@ describe('EduNova Frontend Suite', () => {
             />
           }
         />
-        <MobileBottomNav user={WORKSPACE_USER} />
+        <MobileBottomNav user={TEACHER_USER} />
       </MemoryRouter>
     );
     expect(screen.getByText('Rahul Sharma')).toBeInTheDocument();
@@ -283,17 +409,26 @@ describe('EduNova Frontend Suite', () => {
     fireEvent.click(screen.getByText('2'));
     expect(onPageChange).toHaveBeenCalledWith(2);
     expect(screen.getByLabelText('Mobile navigation')).toBeInTheDocument();
+    expect(screen.getByText('Reports')).toBeInTheDocument();
   });
 
-  it('StudentsPage fetches records, shows Add/Export actions, and filters cohorts', async () => {
+  it('StudentsPage hides Admin actions for Teacher and passes search/branch filters to API', async () => {
     vi.mocked(api.getStudents).mockResolvedValue(SAMPLE_STUDENTS);
-    render(
+    const { rerender } = render(
       <MemoryRouter>
-        <StudentsPage currentUser={WORKSPACE_USER} onDataChanged={vi.fn()} onNotify={vi.fn()} />
+        <StudentsPage currentUser={TEACHER_USER} onDataChanged={vi.fn()} onNotify={vi.fn()} />
       </MemoryRouter>
     );
 
     await waitFor(() => expect(screen.getByText('Rahul Sharma')).toBeInTheDocument());
+    expect(screen.queryByText('Add Student')).not.toBeInTheDocument();
+    expect(screen.queryByText('Export CSV')).not.toBeInTheDocument();
+
+    rerender(
+      <MemoryRouter>
+        <StudentsPage currentUser={ADMIN_USER} onDataChanged={vi.fn()} onNotify={vi.fn()} />
+      </MemoryRouter>
+    );
     expect(screen.getByText('Add Student')).toBeInTheDocument();
     expect(screen.getByText('Export CSV')).toBeInTheDocument();
 
@@ -403,7 +538,7 @@ describe('EduNova Frontend Suite', () => {
           examinations={SAMPLE_EXAMS}
           selectedExamId={2}
           onSelectExam={vi.fn()}
-          user={WORKSPACE_USER}
+          user={ADMIN_USER}
         />
       </MemoryRouter>
     );

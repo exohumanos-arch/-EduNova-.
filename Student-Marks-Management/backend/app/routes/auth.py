@@ -205,12 +205,32 @@ def _extract_session_token(request: Request) -> Optional[str]:
 
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> SessionPrincipal:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication session required or expired",
+    )
+    raw_token = _extract_session_token(request)
+    if not raw_token:
+        raise credentials_exception
+
+    payload = _verify_session_token(raw_token)
+    if not payload:
+        raise credentials_exception
+
+    session_row = db.query(AuthSession).filter(AuthSession.sid == payload["sid"]).first()
+    now_ms = int(time.time() * 1000)
+    if not session_row or session_row.revoked == 1 or now_ms >= session_row.expires_at:
+        raise credentials_exception
+
+    if session_row.role != payload["role"]:
+        raise credentials_exception
+
     return SessionPrincipal(
-        id=1,
-        username="Administrator",
-        role="ADMIN",
-        sid="open-workspace",
-        expires_at=int(time.time() * 1000) + SESSION_TTL_SECONDS * 1000,
+        id=1 if session_row.role == "ADMIN" else 2,
+        username=session_row.username,
+        role=session_row.role,
+        sid=session_row.sid,
+        expires_at=session_row.expires_at,
     )
 
 
