@@ -1,19 +1,23 @@
 import { execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { GoogleGenAI, Type } from '@google/genai';
-import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
 import express, { NextFunction, Request, Response } from 'express';
-import jwt from 'jsonwebtoken';
 import multer from 'multer';
 import { createServer as createViteServer } from 'vite';
 
 dotenv.config();
 
 const PORT = 3000;
-const JWT_SECRET = process.env.JWT_SECRET || 'acadledger-dev-secret-key-2026';
+const SESSION_SECRET =
+  process.env.SESSION_SECRET || process.env.JWT_SECRET || 'edunova-dev-session-secret-2026';
+const SESSION_COOKIE_NAME = 'edunova_session';
+const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 12 * 60 * 60 * 1000);
+const RATE_LIMIT_MAX_ATTEMPTS = Number(process.env.LOGIN_RATE_LIMIT_MAX || 5);
+const RATE_LIMIT_WINDOW_MS = Number(process.env.LOGIN_RATE_LIMIT_WINDOW_MS || 60 * 1000);
 const ROOT_DIR = process.cwd();
 const PYTHON_BACKEND_DIR = path.join(ROOT_DIR, 'Student-Marks-Management', 'backend');
 const UPLOADS_DIR = path.join(PYTHON_BACKEND_DIR, 'uploads');
@@ -77,16 +81,69 @@ db.exec(`
     FOREIGN KEY (exam_id) REFERENCES examinations(id) ON DELETE CASCADE,
     UNIQUE (student_id, subject_id, exam_id)
   );
+  CREATE TABLE IF NOT EXISTS system_config (
+    config_key TEXT PRIMARY KEY,
+    config_value TEXT NOT NULL,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS auth_sessions (
+    sid TEXT PRIMARY KEY,
+    role TEXT NOT NULL CHECK (role IN ('ADMIN', 'TEACHER')),
+    username TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    revoked INTEGER NOT NULL DEFAULT 0
+  );
 `);
 
+function hashAccessCode(code: string, saltHex?: string): string {
+  const salt = saltHex || crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(code, salt, 32).toString('hex');
+  return `${salt}:${derived}`;
+}
+
+function verifyAccessCodeHash(candidate: string, storedHash: string): boolean {
+  const parts = storedHash.split(':');
+  if (parts.length !== 2) return false;
+  const [salt, expectedHex] = parts;
+  const candidateBuf = crypto.scryptSync(candidate, salt, 32);
+  const expectedBuf = Buffer.from(expectedHex, 'hex');
+  if (candidateBuf.length !== expectedBuf.length) return false;
+  return crypto.timingSafeEqual(candidateBuf, expectedBuf);
+}
+
+function getConfigValue(key: string): string | null {
+  const row = db
+    .prepare('SELECT config_value FROM system_config WHERE config_key = ?')
+    .get(key) as { config_value: string } | undefined;
+  return row ? row.config_value : null;
+}
+
+function getConfigMeta(key: string): { config_value: string; updated_at: string } | null {
+  const row = db
+    .prepare('SELECT config_value, updated_at FROM system_config WHERE config_key = ?')
+    .get(key) as { config_value: string; updated_at: string } | undefined;
+  return row ?? null;
+}
+
+function setConfigValue(key: string, value: string): void {
+  db.prepare(
+    `INSERT INTO system_config (config_key, config_value, updated_at)
+     VALUES (?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(config_key) DO UPDATE SET config_value = excluded.config_value, updated_at = CURRENT_TIMESTAMP`
+  ).run(key, value);
+}
+
 function seedInitialData() {
-  const userCount = (db.prepare('SELECT COUNT(*) as c FROM users').get() as { c: number }).c;
-  if (userCount === 0) {
-    const insertUser = db.prepare(
-      'INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)'
-    );
-    insertUser.run('Dr. Arvind Mehta', 'admin@acadledger.edu', bcrypt.hashSync('Admin@2026', 10), 'ADMIN');
-    insertUser.run('Prof. Neha Kapoor', 'teacher@acadledger.edu', bcrypt.hashSync('Teacher@2026', 10), 'TEACHER');
+  const envAdminCode = process.env.ADMIN_ACCESS_CODE || 'ADMIN2026';
+  const envTeacherCode = process.env.TEACHER_ACCESS_CODE || 'TEACHER2026';
+
+  if (getConfigValue('admin_code_custom') !== '1') {
+    setConfigValue('admin_access_code_hash', hashAccessCode(envAdminCode));
+  }
+  if (getConfigValue('teacher_code_custom') !== '1') {
+    setConfigValue('teacher_access_code_hash', hashAccessCode(envTeacherCode));
   }
 
   const studentCount = (db.prepare('SELECT COUNT(*) as c FROM students').get() as { c: number }).c;
@@ -260,28 +317,210 @@ function getGeminiClient(): GoogleGenAI {
 interface AuthUser {
   id: number;
   username: string;
-  email: string;
   role: 'ADMIN' | 'TEACHER';
 }
 
 interface AuthRequest extends Request {
   user?: AuthUser;
+  sessionId?: string;
+  sessionExpiresAt?: number;
+}
+
+interface SignedSessionPayload {
+  sid: string;
+  role: 'ADMIN' | 'TEACHER';
+  exp: number;
+}
+
+const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+
+function getClientIp(req: Request): string {
+  const fwd = req.headers['x-forwarded-for'];
+  if (typeof fwd === 'string' && fwd.trim()) {
+    return fwd.split(',')[0].trim();
+  }
+  return req.ip || req.socket.remoteAddress || 'unknown';
+}
+
+function checkRateLimit(key: string): { allowed: boolean; retryAfterSec: number } {
+  const now = Date.now();
+  const entry = loginAttempts.get(key);
+  if (!entry || now >= entry.resetAt) {
+    return { allowed: true, retryAfterSec: 0 };
+  }
+  if (entry.count >= RATE_LIMIT_MAX_ATTEMPTS) {
+    return { allowed: false, retryAfterSec: Math.max(1, Math.ceil((entry.resetAt - now) / 1000)) };
+  }
+  return { allowed: true, retryAfterSec: 0 };
+}
+
+function recordFailedAttempt(key: string): { locked: boolean; retryAfterSec: number } {
+  const now = Date.now();
+  const entry = loginAttempts.get(key);
+  if (!entry || now >= entry.resetAt) {
+    loginAttempts.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    return { locked: false, retryAfterSec: 0 };
+  }
+  entry.count += 1;
+  loginAttempts.set(key, entry);
+  if (entry.count >= RATE_LIMIT_MAX_ATTEMPTS) {
+    return { locked: true, retryAfterSec: Math.max(1, Math.ceil((entry.resetAt - now) / 1000)) };
+  }
+  return { locked: false, retryAfterSec: 0 };
+}
+
+function clearRateLimit(key: string): void {
+  loginAttempts.delete(key);
+}
+
+function parseCookies(cookieHeader?: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!cookieHeader) return out;
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx <= 0) continue;
+    const key = part.slice(0, idx).trim();
+    const val = part.slice(idx + 1).trim();
+    try {
+      out[key] = decodeURIComponent(val);
+    } catch {
+      out[key] = val;
+    }
+  }
+  return out;
+}
+
+function signSessionToken(payload: SignedSessionPayload): string {
+  const payloadB64 = Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64url');
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payloadB64).digest('base64url');
+  return `${payloadB64}.${sig}`;
+}
+
+function verifySessionToken(token: string): SignedSessionPayload | null {
+  const dotIdx = token.indexOf('.');
+  if (dotIdx <= 0) return null;
+  const payloadB64 = token.slice(0, dotIdx);
+  const sigB64 = token.slice(dotIdx + 1);
+  const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(payloadB64).digest('base64url');
+  const sigBuf = Buffer.from(sigB64, 'utf-8');
+  const expBuf = Buffer.from(expectedSig, 'utf-8');
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf-8')) as SignedSessionPayload;
+    if (!parsed?.sid || (parsed.role !== 'ADMIN' && parsed.role !== 'TEACHER') || typeof parsed.exp !== 'number') {
+      return null;
+    }
+    if (Date.now() >= parsed.exp) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function isHttpsRequest(req: Request): boolean {
+  const origin = String(req.headers.origin || '');
+  const referer = String(req.headers.referer || '');
+  const host = String(req.headers.host || '');
+  return Boolean(
+    req.secure ||
+      req.headers['x-forwarded-proto'] === 'https' ||
+      origin.startsWith('https://') ||
+      referer.startsWith('https://') ||
+      host.endsWith('.run.app') ||
+      process.env.NODE_ENV === 'production'
+  );
+}
+
+function setSessionCookie(req: Request, res: Response, token: string, ttlMs: number) {
+  const maxAgeSec = Math.max(1, Math.floor(ttlMs / 1000));
+  const secure = isHttpsRequest(req);
+  const parts = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    `Max-Age=${maxAgeSec}`,
+    secure ? 'SameSite=None' : 'SameSite=Lax',
+  ];
+  if (secure) {
+    parts.push('Secure');
+    parts.push('Partitioned');
+  }
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+
+function clearSessionCookie(req: Request, res: Response) {
+  const secure = isHttpsRequest(req);
+  const parts = [
+    `${SESSION_COOKIE_NAME}=`,
+    'Path=/',
+    'HttpOnly',
+    'Max-Age=0',
+    secure ? 'SameSite=None' : 'SameSite=Lax',
+  ];
+  if (secure) {
+    parts.push('Secure');
+    parts.push('Partitioned');
+  }
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+
+function extractSessionToken(req: Request): string | null {
+  const cookies = parseCookies(req.headers.cookie);
+  if (cookies[SESSION_COOKIE_NAME]) {
+    return cookies[SESSION_COOKIE_NAME];
+  }
+  const authHeader = req.headers.authorization;
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.slice(7).trim();
+    if (token) return token;
+  }
+  return null;
 }
 
 function authenticateToken(req: AuthRequest, res: Response, next: NextFunction) {
-  const authHeader = req.headers.authorization;
-  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
-  if (!token) {
-    res.status(401).json({ error: 'Authentication token required' });
+  const rawToken = extractSessionToken(req);
+  if (!rawToken) {
+    res.status(401).json({ error: 'Authentication session required' });
     return;
   }
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET) as AuthUser;
-    req.user = decoded;
-    next();
-  } catch {
-    res.status(401).json({ error: 'Session expired or invalid token' });
+
+  const payload = verifySessionToken(rawToken);
+  if (!payload) {
+    clearSessionCookie(req, res);
+    res.status(401).json({ error: 'Session expired or invalid' });
+    return;
   }
+
+  const sessionRow = db
+    .prepare('SELECT sid, role, username, expires_at, revoked FROM auth_sessions WHERE sid = ?')
+    .get(payload.sid) as
+    | { sid: string; role: 'ADMIN' | 'TEACHER'; username: string; expires_at: number; revoked: number }
+    | undefined;
+
+  if (!sessionRow || sessionRow.revoked === 1 || Date.now() >= sessionRow.expires_at) {
+    clearSessionCookie(req, res);
+    res.status(401).json({ error: 'Session expired or terminated' });
+    return;
+  }
+
+  if (sessionRow.role !== payload.role) {
+    clearSessionCookie(req, res);
+    res.status(401).json({ error: 'Invalid session role state' });
+    return;
+  }
+
+  req.user = {
+    id: sessionRow.role === 'ADMIN' ? 1 : 2,
+    username: sessionRow.username,
+    role: sessionRow.role,
+  };
+  req.sessionId = sessionRow.sid;
+  req.sessionExpiresAt = sessionRow.expires_at;
+  next();
 }
 
 function requireAdmin(req: AuthRequest, res: Response, next: NextFunction) {
@@ -312,115 +551,171 @@ const upload = multer({
 
 async function startServer() {
   const app = express();
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '4mb' }));
 
-  // --- AUTH ROUTES ---
-  app.post('/api/auth/login', (req: Request, res: Response) => {
-    const { email, password } = req.body ?? {};
-    if (!email || !password) {
-      res.status(400).json({ error: 'Email and password are required' });
+  // --- ROLE-BASED ACCESS CODE AUTH ROUTES ---
+  app.post('/api/auth/code-login', (req: Request, res: Response) => {
+    const rawRole = typeof req.body?.role === 'string' ? req.body.role.trim().toUpperCase() : '';
+    const accessCode = typeof req.body?.access_code === 'string' ? req.body.access_code.trim() : '';
+
+    if (rawRole !== 'ADMIN' && rawRole !== 'TEACHER') {
+      res.status(400).json({ error: 'Role must be either admin or teacher' });
       return;
     }
-    const user = db
-      .prepare('SELECT id, username, email, password_hash, role FROM users WHERE email = ?')
-      .get(String(email).trim().toLowerCase()) as
-      | { id: number; username: string; email: string; password_hash: string; role: 'ADMIN' | 'TEACHER' }
-      | undefined;
-
-    if (!user || !bcrypt.compareSync(String(password), user.password_hash)) {
-      res.status(401).json({ error: 'Invalid email or password' });
+    if (!accessCode) {
+      res.status(400).json({ error: 'Access code is required' });
       return;
     }
 
-    const tokenPayload: AuthUser = {
-      id: user.id,
-      username: user.username,
-      email: user.email,
-      role: user.role,
+    const rateKey = `${getClientIp(req)}:${rawRole}`;
+    const limitStatus = checkRateLimit(rateKey);
+    if (!limitStatus.allowed) {
+      res.setHeader('Retry-After', String(limitStatus.retryAfterSec));
+      res.status(429).json({
+        error: `Too many failed login attempts. Please try again in ${limitStatus.retryAfterSec}s.`,
+      });
+      return;
+    }
+
+    const hashKey = rawRole === 'ADMIN' ? 'admin_access_code_hash' : 'teacher_access_code_hash';
+    const storedHash = getConfigValue(hashKey);
+    const verified = storedHash ? verifyAccessCodeHash(accessCode, storedHash) : false;
+
+    if (!verified) {
+      const attempt = recordFailedAttempt(rateKey);
+      if (attempt.locked) {
+        res.setHeader('Retry-After', String(attempt.retryAfterSec));
+        res.status(429).json({
+          error: `Too many failed login attempts. Please try again in ${attempt.retryAfterSec}s.`,
+        });
+        return;
+      }
+      res.status(401).json({
+        error: `Invalid ${rawRole === 'ADMIN' ? 'Admin' : 'Teacher'} access code`,
+      });
+      return;
+    }
+
+    clearRateLimit(rateKey);
+
+    const sid = crypto.randomBytes(24).toString('base64url');
+    const now = Date.now();
+    const expiresAt = now + SESSION_TTL_MS;
+    const username = rawRole === 'ADMIN' ? 'Administrator' : 'Teacher';
+
+    db.prepare(
+      'INSERT INTO auth_sessions (sid, role, username, created_at, expires_at, revoked) VALUES (?, ?, ?, ?, ?, 0)'
+    ).run(sid, rawRole, username, now, expiresAt);
+
+    const signedCookieToken = signSessionToken({ sid, role: rawRole, exp: expiresAt });
+    setSessionCookie(req, res, signedCookieToken, SESSION_TTL_MS);
+
+    const userPayload: AuthUser = {
+      id: rawRole === 'ADMIN' ? 1 : 2,
+      username,
+      role: rawRole,
     };
-    const access_token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '12h' });
-    res.json({ access_token, user: tokenPayload });
-  });
 
-  app.post('/api/auth/register', (req: Request, res: Response) => {
-    const { username, email, password, role } = req.body ?? {};
-    if (!username || !email || !password || String(password).length < 6) {
-      res.status(400).json({ error: 'Valid name, email, and password (min 6 chars) are required' });
-      return;
-    }
-    const cleanEmail = String(email).trim().toLowerCase();
-    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(cleanEmail);
-    if (existing) {
-      res.status(409).json({ error: 'An account with this email already exists' });
-      return;
-    }
-    const safeRole: 'ADMIN' | 'TEACHER' = role === 'ADMIN' ? 'ADMIN' : 'TEACHER';
-    const hash = bcrypt.hashSync(String(password), 10);
-    const info = db
-      .prepare('INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)')
-      .run(String(username).trim(), cleanEmail, hash, safeRole);
-
-    const tokenPayload: AuthUser = {
-      id: Number(info.lastInsertRowid),
-      username: String(username).trim(),
-      email: cleanEmail,
-      role: safeRole,
-    };
-    const access_token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '12h' });
-    res.status(201).json({ access_token, user: tokenPayload });
+    res.json({
+      authenticated: true,
+      role: rawRole,
+      user: userPayload,
+      session_token: signedCookieToken,
+      expires_at: new Date(expiresAt).toISOString(),
+    });
   });
 
   app.get('/api/auth/me', authenticateToken, (req: AuthRequest, res: Response) => {
-    res.json({ user: req.user });
+    res.json({
+      authenticated: true,
+      role: req.user!.role,
+      user: req.user,
+      expires_at: req.sessionExpiresAt ? new Date(req.sessionExpiresAt).toISOString() : undefined,
+    });
   });
 
   app.post('/api/auth/refresh', authenticateToken, (req: AuthRequest, res: Response) => {
-    const cleanPayload: AuthUser = {
-      id: req.user!.id,
-      username: req.user!.username,
-      email: req.user!.email,
+    const newExp = Date.now() + SESSION_TTL_MS;
+    db.prepare('UPDATE auth_sessions SET expires_at = ? WHERE sid = ?').run(newExp, req.sessionId!);
+    const signedCookieToken = signSessionToken({
+      sid: req.sessionId!,
       role: req.user!.role,
-    };
-    const access_token = jwt.sign(cleanPayload, JWT_SECRET, { expiresIn: '12h' });
-    res.json({ access_token });
+      exp: newExp,
+    });
+    setSessionCookie(req, res, signedCookieToken, SESSION_TTL_MS);
+    res.json({
+      refreshed: true,
+      role: req.user!.role,
+      user: req.user,
+      session_token: signedCookieToken,
+      expires_at: new Date(newExp).toISOString(),
+    });
   });
 
-  app.post('/api/auth/logout', authenticateToken, (_req: AuthRequest, res: Response) => {
+  app.post('/api/auth/logout', (req: Request, res: Response) => {
+    const rawToken = extractSessionToken(req);
+    if (rawToken) {
+      const payload = verifySessionToken(rawToken);
+      if (payload?.sid) {
+        db.prepare('UPDATE auth_sessions SET revoked = 1 WHERE sid = ?').run(payload.sid);
+      }
+    }
+    clearSessionCookie(req, res);
     res.json({ logged_out: true });
   });
 
-  // --- USERS (Admin only) ---
-  app.get('/api/users', authenticateToken, requireAdmin, (_req: AuthRequest, res: Response) => {
-    const users = db.prepare('SELECT id, username, email, role, created_at FROM users ORDER BY id ASC').all();
-    res.json(users);
+  // --- ADMIN ACCESS CODE CONFIGURATION (Admin only — never exposes plaintext codes) ---
+  app.get('/api/admin/access-codes', authenticateToken, requireAdmin, (_req: AuthRequest, res: Response) => {
+    const teacherMeta = getConfigMeta('teacher_access_code_hash');
+    const adminMeta = getConfigMeta('admin_access_code_hash');
+    res.json({
+      admin_code_configured: Boolean(adminMeta),
+      teacher_code_configured: Boolean(teacherMeta),
+      admin_code_updated_at: adminMeta?.updated_at ?? null,
+      teacher_code_updated_at: teacherMeta?.updated_at ?? null,
+      rate_limit_max_attempts: RATE_LIMIT_MAX_ATTEMPTS,
+      rate_limit_window_seconds: Math.round(RATE_LIMIT_WINDOW_MS / 1000),
+      session_ttl_hours: Number((SESSION_TTL_MS / (60 * 60 * 1000)).toFixed(1)),
+    });
   });
 
-  app.post('/api/users', authenticateToken, requireAdmin, (req: AuthRequest, res: Response) => {
-    const { username, email, password, role } = req.body ?? {};
-    if (!username || !email || !password || String(password).length < 6) {
-      res.status(400).json({ error: 'Valid username, email, and password (6+ chars) required' });
-      return;
-    }
-    const cleanEmail = String(email).trim().toLowerCase();
-    if (db.prepare('SELECT id FROM users WHERE email = ?').get(cleanEmail)) {
-      res.status(409).json({ error: 'Email already registered' });
-      return;
-    }
-    const safeRole = role === 'ADMIN' ? 'ADMIN' : 'TEACHER';
-    const info = db
-      .prepare('INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)')
-      .run(String(username).trim(), cleanEmail, bcrypt.hashSync(String(password), 10), safeRole);
-    res.status(201).json({ id: Number(info.lastInsertRowid), username, email: cleanEmail, role: safeRole });
-  });
+  app.put('/api/admin/access-codes', authenticateToken, requireAdmin, (req: AuthRequest, res: Response) => {
+    const targetRole = typeof req.body?.target_role === 'string' ? req.body.target_role.trim().toUpperCase() : '';
+    const newCode = typeof req.body?.new_code === 'string' ? req.body.new_code.trim() : '';
+    const currentAdminCode =
+      typeof req.body?.current_admin_code === 'string' ? req.body.current_admin_code.trim() : '';
 
-  app.delete('/api/users/:id', authenticateToken, requireAdmin, (req: AuthRequest, res: Response) => {
-    const id = Number(req.params.id);
-    if (req.user?.id === id) {
-      res.status(400).json({ error: 'Cannot delete the currently logged-in administrator' });
+    if (targetRole !== 'TEACHER' && targetRole !== 'ADMIN') {
+      res.status(400).json({ error: 'target_role must be TEACHER or ADMIN' });
       return;
     }
-    db.prepare('DELETE FROM users WHERE id = ?').run(id);
-    res.json({ deleted: true });
+    if (newCode.length < 6 || newCode.length > 64) {
+      res.status(400).json({ error: 'New access code must be between 6 and 64 characters' });
+      return;
+    }
+
+    if (targetRole === 'ADMIN') {
+      const adminHash = getConfigValue('admin_access_code_hash');
+      if (!currentAdminCode || !adminHash || !verifyAccessCodeHash(currentAdminCode, adminHash)) {
+        res.status(401).json({ error: 'Current Admin access code verification failed' });
+        return;
+      }
+      setConfigValue('admin_access_code_hash', hashAccessCode(newCode));
+      setConfigValue('admin_code_custom', '1');
+    } else {
+      setConfigValue('teacher_access_code_hash', hashAccessCode(newCode));
+      setConfigValue('teacher_code_custom', '1');
+    }
+
+    const updatedMeta = getConfigMeta(
+      targetRole === 'ADMIN' ? 'admin_access_code_hash' : 'teacher_access_code_hash'
+    );
+    res.json({
+      updated: true,
+      target_role: targetRole,
+      updated_at: updatedMeta?.updated_at ?? new Date().toISOString(),
+    });
   });
 
   // --- STUDENTS CRUD ---
@@ -854,7 +1149,15 @@ async function startServer() {
   });
 
   app.get('/api/health/db', (_req: Request, res: Response) => {
-    const tables = ['users', 'students', 'subjects', 'examinations', 'marks'];
+    res.json({
+      connected: true,
+      database: 'student_management_db',
+      engine: 'SQLite (MySQL Schema Mirror)',
+    });
+  });
+
+  app.get('/api/admin/db-health', authenticateToken, requireAdmin, (_req: AuthRequest, res: Response) => {
+    const tables = ['students', 'subjects', 'examinations', 'marks', 'system_config'];
     const counts = Object.fromEntries(
       tables.map((t) => [t, (db.prepare(`SELECT COUNT(*) as c FROM ${t}`).get() as { c: number }).c])
     );
@@ -869,7 +1172,6 @@ async function startServer() {
       counts,
       row_counts: counts,
       unique_constraints: [
-        'uq_users_email',
         'uq_students_roll_no',
         'uq_students_email',
         'uq_subjects_code',
@@ -1089,6 +1391,10 @@ async function startServer() {
     let filename = 'export.csv';
 
     if (type === 'students') {
+      if (req.user?.role !== 'ADMIN') {
+        res.status(403).json({ error: 'Administrator privileges required to export full student directory' });
+        return;
+      }
       columns = ['roll_no', 'name', 'email', 'course', 'branch', 'semester'];
       rows = db.prepare('SELECT roll_no, name, email, course, branch, semester FROM students ORDER BY roll_no ASC').all() as Record<string, unknown>[];
       filename = 'students_export.csv';

@@ -13,7 +13,6 @@ import {
   Box,
   MessageSquare,
   Code2,
-  UserCog,
   Settings,
   LogOut,
   X,
@@ -42,8 +41,7 @@ export const SIDEBAR_NAV_ITEMS: NavRouteItem[] = [
   { to: '/observatory-3d', label: '3D Observatory', icon: Box },
   { to: '/ai-advisor', label: 'AI Advisor', icon: MessageSquare },
   { to: '/python-inspector', label: 'Python Inspector', icon: Code2 },
-  { to: '/users', label: 'User Management', icon: UserCog, adminOnly: true },
-  { to: '/settings', label: 'Settings', icon: Settings },
+  { to: '/settings', label: 'Settings', icon: Settings, adminOnly: true },
 ];
 
 interface SidebarProps {
@@ -62,6 +60,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const visibleItems = SIDEBAR_NAV_ITEMS.filter(
     (item) => !item.adminOnly || user.role === 'ADMIN'
   );
+  const roleLabel = user.role === 'ADMIN' ? 'Admin' : 'Teacher';
 
   return (
     <>
@@ -117,7 +116,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <StudentAvatar name={user.username} size="md" />
             <div className="min-w-0">
               <p className="text-sm font-semibold text-[#24243A] truncate">{user.username}</p>
-              <p className="text-xs text-[#85859B] font-mono truncate">{user.role}</p>
+              <p className="text-xs text-[#7357E8] font-semibold truncate">{roleLabel} Portal</p>
             </div>
           </div>
           <button
@@ -126,7 +125,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-[#ECEBF3] bg-[#F7F7FC] px-3 py-2 text-xs font-semibold text-[#24243A] hover:bg-[#EEE9FF] hover:text-[#4935A8] transition-colors"
           >
             <LogOut className="w-3.5 h-3.5" />
-            Sign Out
+            Logout
           </button>
         </div>
       </aside>

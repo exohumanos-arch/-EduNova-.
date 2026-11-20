@@ -1,22 +1,30 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { Award, ClipboardEdit, Home, Settings, Users } from 'lucide-react';
+import { Award, BarChart3, ClipboardEdit, Home, Settings, Users } from 'lucide-react';
+import type { AuthUser } from '../types';
 
-const MOBILE_TABS = [
-  { to: '/dashboard', label: 'Home', icon: Home },
-  { to: '/students', label: 'Students', icon: Users },
-  { to: '/marks', label: 'Marks', icon: ClipboardEdit },
-  { to: '/results', label: 'Results', icon: Award },
-  { to: '/settings', label: 'Profile', icon: Settings },
-];
+interface MobileBottomNavProps {
+  user?: AuthUser;
+}
 
-export const MobileBottomNav: React.FC = () => {
+export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ user }) => {
+  const isAdmin = user?.role === 'ADMIN';
+  const tabs = [
+    { to: '/dashboard', label: 'Home', icon: Home },
+    { to: '/students', label: 'Students', icon: Users },
+    { to: '/marks', label: 'Marks', icon: ClipboardEdit },
+    { to: '/results', label: 'Results', icon: Award },
+    isAdmin
+      ? { to: '/settings', label: 'Settings', icon: Settings }
+      : { to: '/reports', label: 'Reports', icon: BarChart3 },
+  ];
+
   return (
     <nav
       aria-label="Mobile navigation"
       className="fixed bottom-0 inset-x-0 z-40 h-16 bg-white border-t border-[#ECEBF3] flex items-center justify-around px-2 lg:hidden no-print"
     >
-      {MOBILE_TABS.map((tab) => {
+      {tabs.map((tab) => {
         const Icon = tab.icon;
         return (
           <NavLink

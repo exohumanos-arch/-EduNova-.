@@ -3,9 +3,17 @@ export type UserRole = 'ADMIN' | 'TEACHER';
 export interface AuthUser {
   id: number;
   username: string;
-  email: string;
   role: UserRole;
-  created_at?: string;
+}
+
+export interface AccessCodeStatus {
+  admin_code_configured: boolean;
+  teacher_code_configured: boolean;
+  admin_code_updated_at: string | null;
+  teacher_code_updated_at: string | null;
+  rate_limit_max_attempts: number;
+  rate_limit_window_seconds: number;
+  session_ttl_hours: number;
 }
 
 export interface Student {

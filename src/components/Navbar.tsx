@@ -1,6 +1,6 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Bell, Calendar, Menu, Sparkles } from 'lucide-react';
+import { Bell, Calendar, GraduationCap, LogOut, Menu, ShieldCheck, Sparkles } from 'lucide-react';
 import type { AuthUser, DashboardPayload } from '../types';
 import { SearchBar } from './SearchBar';
 import { StudentAvatar } from './StudentAvatar';
@@ -13,6 +13,7 @@ interface NavbarProps {
   dashboard: DashboardPayload | null;
   onOpenMobileMenu: () => void;
   onOpenAiDrawer: () => void;
+  onLogout?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -21,12 +22,16 @@ export const Navbar: React.FC<NavbarProps> = ({
   dashboard,
   onOpenMobileMenu,
   onOpenAiDrawer,
+  onLogout,
 }) => {
   const navigate = useNavigate();
   const [searchQuery, setSearchQuery] = useState('');
   const [searchFocused, setSearchFocused] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const searchContainerRef = useRef<HTMLDivElement | null>(null);
+
+  const isAdmin = user.role === 'ADMIN';
+  const roleLabel = isAdmin ? 'Admin' : 'Teacher';
 
   const todayFormatted = useMemo(
     () =>
@@ -52,13 +57,11 @@ export const Navbar: React.FC<NavbarProps> = ({
       .slice(0, 5);
 
     const pages = SIDEBAR_NAV_ITEMS.filter(
-      (p) =>
-        (!p.adminOnly || user.role === 'ADMIN') &&
-        p.label.toLowerCase().includes(q)
+      (p) => (!p.adminOnly || isAdmin) && p.label.toLowerCase().includes(q)
     ).slice(0, 4);
 
     return { students, pages };
-  }, [searchQuery, dashboard, user.role]);
+  }, [searchQuery, dashboard, isAdmin]);
 
   const alertCount = dashboard?.summary.low_performers.length ?? 0;
 
@@ -152,8 +155,8 @@ export const Navbar: React.FC<NavbarProps> = ({
         )}
       </div>
 
-      {/* Right: Date, AI CTA, Notifications, Profile */}
-      <div className="flex items-center gap-3 shrink-0">
+      {/* Right: Date, AI CTA, Notifications, Role Display & Logout */}
+      <div className="flex items-center gap-2.5 sm:gap-3 shrink-0">
         <div className="hidden xl:flex items-center gap-1.5 text-xs text-[#85859B] tabular-nums pr-1">
           <Calendar className="w-3.5 h-3.5" />
           <span>{todayFormatted}</span>
@@ -190,13 +193,43 @@ export const Navbar: React.FC<NavbarProps> = ({
           />
         </div>
 
-        <Link
-          to="/settings"
-          title="Account settings"
-          className="flex items-center gap-2.5 pl-1 rounded-xl hover:opacity-90 transition-opacity"
-        >
-          <StudentAvatar name={user.username} size="sm" />
-        </Link>
+        {isAdmin ? (
+          <Link
+            to="/settings"
+            title="Admin Settings"
+            className="flex items-center gap-2 rounded-xl border border-[#ECEBF3] bg-[#F7F7FC] pl-1.5 pr-2.5 py-1 hover:border-[#7357E8]/40 hover:bg-[#EEE9FF]/50 transition-colors"
+          >
+            <StudentAvatar name={user.username} size="sm" />
+            <span className="hidden sm:inline-flex items-center gap-1 text-xs font-semibold text-[#4935A8]">
+              <ShieldCheck className="w-3.5 h-3.5 text-[#7357E8]" />
+              {roleLabel}
+            </span>
+          </Link>
+        ) : (
+          <div
+            aria-label="Current role"
+            className="flex items-center gap-2 rounded-xl border border-[#ECEBF3] bg-[#F7F7FC] pl-1.5 pr-2.5 py-1"
+          >
+            <StudentAvatar name={user.username} size="sm" />
+            <span className="hidden sm:inline-flex items-center gap-1 text-xs font-semibold text-[#24243A]">
+              <GraduationCap className="w-3.5 h-3.5 text-[#7357E8]" />
+              {roleLabel}
+            </span>
+          </div>
+        )}
+
+        {onLogout && (
+          <button
+            type="button"
+            onClick={onLogout}
+            aria-label="Logout"
+            title="Logout"
+            className="inline-flex items-center gap-1.5 rounded-xl border border-[#ECEBF3] bg-white px-2.5 py-2 text-xs font-semibold text-[#24243A] hover:bg-[#FDECEC] hover:text-[#C23E3E] hover:border-[#EF6262]/40 transition-colors"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span className="hidden lg:inline">Logout</span>
+          </button>
+        )}
       </div>
     </header>
   );

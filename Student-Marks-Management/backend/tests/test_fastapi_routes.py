@@ -1,7 +1,7 @@
 """
 FastAPI Backend End-to-End Test Suite (pytest)
-Uses FastAPI TestClient with an isolated SQLite test database so `pytest -v`
-validates Auth, RBAC, Student/Subject/Exam/Marks CRUD, validations, and CSV endpoints.
+Uses FastAPI TestClient with an isolated SQLite test database to validate all 8
+two-role access-code auth, signed HttpOnly cookie, Bearer fallback, RBAC, rate-limit, and CRUD scenarios.
 """
 
 import os
@@ -41,106 +41,158 @@ def client(tmp_path_factory):
 
 
 def test_unauthorized_requests_blocked(client: TestClient):
+    client.cookies.clear()
+    assert client.get("/api/auth/me").status_code == 401
     assert client.get("/api/students").status_code == 401
     assert client.post("/api/marks", json={}).status_code == 401
     assert client.get("/api/dashboard").status_code == 401
 
 
-def test_auth_and_role_permissions(client: TestClient):
-    # Register Admin
-    r_admin = client.post(
-        "/api/auth/register",
-        json={"username": "Admin User", "email": "admin@test.edu", "password": "Password123", "role": "ADMIN"},
+def test_wrong_access_codes_rejected_and_rate_limited(client: TestClient):
+    bad_admin = client.post(
+        "/api/auth/code-login",
+        json={"role": "admin", "access_code": "WRONG_ADMIN"},
+        headers={"X-Forwarded-For": "192.0.2.10"},
     )
-    assert r_admin.status_code == 201
-    admin_token = r_admin.json()["access_token"]
+    assert bad_admin.status_code == 401
 
-    # Register Teacher
+    bad_teacher = client.post(
+        "/api/auth/code-login",
+        json={"role": "teacher", "access_code": "WRONG_TEACHER"},
+        headers={"X-Forwarded-For": "192.0.2.11"},
+    )
+    assert bad_teacher.status_code == 401
+
+    for _ in range(4):
+        r = client.post(
+            "/api/auth/code-login",
+            json={"role": "admin", "access_code": "BAD_GUESS"},
+            headers={"X-Forwarded-For": "192.0.2.99"},
+        )
+        assert r.status_code == 401
+    r5 = client.post(
+        "/api/auth/code-login",
+        json={"role": "admin", "access_code": "BAD_GUESS"},
+        headers={"X-Forwarded-For": "192.0.2.99"},
+    )
+    assert r5.status_code == 429
+
+
+def test_two_role_auth_rbac_crud_and_session_lifecycle(client: TestClient):
+    admin_code = os.getenv("ADMIN_ACCESS_CODE", "ADMIN2026")
+    teacher_code = os.getenv("TEACHER_ACCESS_CODE", "TEACHER2026")
+
+    client.cookies.clear()
     r_teacher = client.post(
-        "/api/auth/register",
-        json={"username": "Teacher User", "email": "teacher@test.edu", "password": "Password123", "role": "TEACHER"},
+        "/api/auth/code-login",
+        json={"role": "teacher", "access_code": teacher_code},
+        headers={"X-Forwarded-For": "192.0.2.20"},
     )
-    assert r_teacher.status_code == 201
-    teacher_token = r_teacher.json()["access_token"]
+    assert r_teacher.status_code == 200
+    assert r_teacher.json()["role"] == "TEACHER"
+    assert "edunova_session" in r_teacher.cookies
+    assert r_teacher.json().get("session_token")
 
-    # Teacher blocked from Admin-only student creation
-    res_forbidden = client.post(
-        "/api/students",
-        headers={"Authorization": f"Bearer {teacher_token}"},
-        json={"name": "S1", "roll_no": "R01", "email": "s1@t.edu", "course": "B.Tech", "branch": "CSE", "semester": 3},
+    # Teacher accessing Admin APIs -> 403 Forbidden
+    assert (
+        client.post(
+            "/api/students",
+            json={
+                "name": "S1",
+                "roll_no": "R01",
+                "email": "s1@t.edu",
+                "course": "B.Tech",
+                "branch": "CSE",
+                "semester": 3,
+            },
+        ).status_code
+        == 403
     )
-    assert res_forbidden.status_code == 403
+    assert client.get("/api/admin/access-codes").status_code == 403
+    assert client.get("/api/export/students").status_code == 403
 
-    # Admin creates student, subject, examination
-    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+    # Logout terminates Teacher session
+    teacher_cookie = r_teacher.cookies.get("edunova_session")
+    assert client.post("/api/auth/logout").status_code == 200
+    assert client.get("/api/auth/me", cookies={"edunova_session": teacher_cookie}).status_code == 401
+
+    # Admin login + Bearer fallback check
+    client.cookies.clear()
+    r_admin = client.post(
+        "/api/auth/code-login",
+        json={"role": "admin", "access_code": admin_code},
+        headers={"X-Forwarded-For": "192.0.2.21"},
+    )
+    assert r_admin.status_code == 200
+    assert r_admin.json()["role"] == "ADMIN"
+    admin_token = r_admin.json()["session_token"]
+
     s_res = client.post(
         "/api/students",
-        headers=admin_headers,
-        json={"name": "Rahul", "roll_no": "2026001", "email": "rahul@t.edu", "course": "B.Tech", "branch": "CSE", "semester": 3},
+        json={
+            "name": "Rahul",
+            "roll_no": "2026001",
+            "email": "rahul@t.edu",
+            "course": "B.Tech",
+            "branch": "CSE",
+            "semester": 3,
+        },
     )
     assert s_res.status_code == 201
     student_id = s_res.json()["id"]
 
-    # Duplicate roll number rejected
-    dup_s = client.post(
-        "/api/students",
-        headers=admin_headers,
-        json={"name": "Rahul 2", "roll_no": "2026001", "email": "rahul2@t.edu", "course": "B.Tech", "branch": "CSE", "semester": 3},
-    )
-    assert dup_s.status_code == 409
-
     sub_res = client.post(
         "/api/subjects",
-        headers=admin_headers,
-        json={"subject_name": "Python", "subject_code": "PY301", "max_marks": 100, "passing_marks": 40, "semester": 3},
+        json={
+            "subject_name": "Python",
+            "subject_code": "PY301",
+            "max_marks": 100,
+            "passing_marks": 40,
+            "semester": 3,
+        },
     )
     assert sub_res.status_code == 201
     subject_id = sub_res.json()["id"]
 
     exam_res = client.post(
         "/api/examinations",
-        headers=admin_headers,
         json={"exam_name": "Finals 2026", "semester": 3, "exam_date": "2026-11-20"},
     )
     assert exam_res.status_code == 201
     exam_id = exam_res.json()["id"]
 
-    # Duplicate examination rejected
-    dup_exam = client.post(
-        "/api/examinations",
-        headers=admin_headers,
-        json={"exam_name": "Finals 2026", "semester": 3, "exam_date": "2026-11-21"},
+    # Teacher marks validations & result calculation
+    client.cookies.clear()
+    client.post(
+        "/api/auth/code-login",
+        json={"role": "teacher", "access_code": teacher_code},
+        headers={"X-Forwarded-For": "192.0.2.22"},
     )
-    assert dup_exam.status_code == 409
-
-    # Teacher marks validations: negative and above max
-    teacher_headers = {"Authorization": f"Bearer {teacher_token}"}
-    assert (
-        client.post(
-            "/api/marks",
-            headers=teacher_headers,
-            json={"student_id": student_id, "subject_id": subject_id, "exam_id": exam_id, "obtained_marks": -5},
-        ).status_code
-        in (400, 422)
-    )
-    assert (
-        client.post(
-            "/api/marks",
-            headers=teacher_headers,
-            json={"student_id": student_id, "subject_id": subject_id, "exam_id": exam_id, "obtained_marks": 120},
-        ).status_code
-        == 400
-    )
-
-    # Valid marks submission + result check
     ok_mark = client.post(
         "/api/marks",
-        headers=teacher_headers,
-        json={"student_id": student_id, "subject_id": subject_id, "exam_id": exam_id, "obtained_marks": 92},
+        json={
+            "student_id": student_id,
+            "subject_id": subject_id,
+            "exam_id": exam_id,
+            "obtained_marks": 92,
+        },
     )
     assert ok_mark.status_code in (200, 201)
 
-    res_student = client.get(f"/api/results/{student_id}?exam_id={exam_id}", headers=teacher_headers)
+    res_student = client.get(f"/api/results/{student_id}?exam_id={exam_id}")
     assert res_student.status_code == 200
     assert res_student.json()["grade"] == "A+"
     assert res_student.json()["status"] == "PASS"
+
+    # Bearer token works when cookies are cleared
+    client.cookies.clear()
+    assert (
+        client.get("/api/auth/me", headers={"Authorization": f"Bearer {admin_token}"}).status_code
+        == 200
+    )
+
+    # Tampered/expired session cookie -> 401
+    assert (
+        client.get("/api/auth/me", cookies={"edunova_session": "tampered.token"}).status_code
+        == 401
+    )

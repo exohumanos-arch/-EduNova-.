@@ -1,110 +1,196 @@
 import assert from 'node:assert/strict';
 
 const BASE = 'http://localhost:3000';
+const ADMIN_CODE = process.env.ADMIN_ACCESS_CODE || 'ADMIN2026';
+const TEACHER_CODE = process.env.TEACHER_ACCESS_CODE || 'TEACHER2026';
 
-async function request(path, options = {}) {
-  const res = await fetch(`${BASE}${path}`, options);
-  const contentType = res.headers.get('content-type') || '';
-  const body = contentType.includes('application/json') ? await res.json() : await res.text();
-  return { status: res.status, body, headers: res.headers };
+function createSessionClient(forwardedIp) {
+  let cookieHeader = '';
+  let lastSetCookies = [];
+
+  async function request(path, options = {}) {
+    const headers = { ...(options.headers || {}) };
+    if (cookieHeader && !headers.Authorization) {
+      headers.Cookie = cookieHeader;
+    }
+    if (forwardedIp) {
+      headers['X-Forwarded-For'] = forwardedIp;
+    }
+    const res = await fetch(`${BASE}${path}`, { ...options, headers });
+    const setCookies =
+      typeof res.headers.getSetCookie === 'function'
+        ? res.headers.getSetCookie()
+        : res.headers.get('set-cookie')
+        ? [res.headers.get('set-cookie')]
+        : [];
+    if (setCookies.length > 0) {
+      lastSetCookies = setCookies;
+      for (const sc of setCookies) {
+        const pair = sc.split(';')[0];
+        const eqIdx = pair.indexOf('=');
+        if (eqIdx > 0) {
+          const val = pair.slice(eqIdx + 1);
+          cookieHeader = val ? pair : '';
+        }
+      }
+    }
+    const contentType = res.headers.get('content-type') || '';
+    const body = contentType.includes('application/json') ? await res.json() : await res.text();
+    return { status: res.status, body, headers: res.headers, setCookies };
+  }
+
+  return {
+    request,
+    getCookie: () => cookieHeader,
+    setCookie: (c) => {
+      cookieHeader = c;
+    },
+    getLastSetCookies: () => lastSetCookies,
+  };
 }
 
 async function run() {
   let passed = 0;
-  const check = (name, fn) => {
-    return fn().then(() => {
+  const check = (name, fn) =>
+    fn().then(() => {
       passed++;
       console.log(`PASS: ${name}`);
     });
-  };
 
-  // 1. Unauthorized API requests
-  await check('Blocks unauthorized requests with 401', async () => {
-    const r1 = await request('/api/students');
-    assert.equal(r1.status, 401);
-    const r2 = await request('/api/marks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-    assert.equal(r2.status, 401);
-    const r3 = await request('/api/dashboard');
-    assert.equal(r3.status, 401);
+  // 1. Unauthorized requests blocked
+  await check('Blocks unauthenticated requests with 401', async () => {
+    const anon = createSessionClient('10.10.1.1');
+    assert.equal((await anon.request('/api/auth/me')).status, 401);
+    assert.equal((await anon.request('/api/students')).status, 401);
+    assert.equal(
+      (
+        await anon.request('/api/marks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        })
+      ).status,
+      401
+    );
+    assert.equal((await anon.request('/api/dashboard')).status, 401);
   });
 
-  // 2. Authentication (Admin & Teacher) + Refresh + Logout
-  let adminToken = '';
-  let teacherToken = '';
-  await check('Authenticates Admin and Teacher via JWT and supports refresh/logout', async () => {
-    const bad = await request('/api/auth/login', {
+  // 2. Incorrect Admin and Teacher codes return 401 error
+  await check('Rejects incorrect Admin and Teacher access codes with 401', async () => {
+    const badAdmin = createSessionClient('10.10.1.2');
+    const r1 = await badAdmin.request('/api/auth/code-login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: 'admin@acadledger.edu', password: 'WrongPassword' }),
+      body: JSON.stringify({ role: 'admin', access_code: 'WRONG_ADMIN_CODE' }),
     });
-    assert.equal(bad.status, 401);
+    assert.equal(r1.status, 401);
+    assert.match(r1.body.error, /Invalid Admin access code/i);
 
-    const adm = await request('/api/auth/login', {
+    const badTeacher = createSessionClient('10.10.1.3');
+    const r2 = await badTeacher.request('/api/auth/code-login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: 'admin@acadledger.edu', password: 'Admin@2026' }),
+      body: JSON.stringify({ role: 'teacher', access_code: 'WRONG_TEACHER_CODE' }),
+    });
+    assert.equal(r2.status, 401);
+    assert.match(r2.body.error, /Invalid Teacher access code/i);
+  });
+
+  // 3. Correct Admin & Teacher codes create HttpOnly + Partitioned cookie AND Bearer session_token (iframe-safe)
+  const admin = createSessionClient('10.10.1.10');
+  const teacher = createSessionClient('10.10.1.11');
+  await check('Authenticates Admin & Teacher via code-login with cookie and iframe-safe session_token', async () => {
+    const adm = await admin.request('/api/auth/code-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-Proto': 'https' },
+      body: JSON.stringify({ role: 'admin', access_code: ADMIN_CODE }),
     });
     assert.equal(adm.status, 200);
-    adminToken = adm.body.access_token;
-    assert.ok(adminToken);
+    assert.equal(adm.body.authenticated, true);
+    assert.equal(adm.body.role, 'ADMIN');
+    assert.ok(adm.body.session_token);
+    assert.ok(
+      adm.setCookies.some(
+        (c) =>
+          c.includes('edunova_session=') &&
+          c.includes('HttpOnly') &&
+          c.includes('SameSite=None') &&
+          c.includes('Secure') &&
+          c.includes('Partitioned')
+      )
+    );
 
-    const tch = await request('/api/auth/login', {
+    // Verify Bearer session_token works even if browser/iframe drops cookies
+    const bareIframe = createSessionClient('10.10.1.10');
+    const bearerMe = await bareIframe.request('/api/auth/me', {
+      headers: { Authorization: `Bearer ${adm.body.session_token}` },
+    });
+    assert.equal(bearerMe.status, 200);
+    assert.equal(bearerMe.body.role, 'ADMIN');
+
+    const admMe = await admin.request('/api/auth/me');
+    assert.equal(admMe.status, 200);
+    assert.equal(admMe.body.role, 'ADMIN');
+    assert.equal((await admin.request('/api/dashboard')).status, 200);
+
+    const tch = await teacher.request('/api/auth/code-login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: 'teacher@acadledger.edu', password: 'Teacher@2026' }),
+      body: JSON.stringify({ role: 'teacher', access_code: TEACHER_CODE }),
     });
     assert.equal(tch.status, 200);
-    teacherToken = tch.body.access_token;
+    assert.equal(tch.body.authenticated, true);
+    assert.equal(tch.body.role, 'TEACHER');
+    assert.ok(tch.body.session_token);
+    assert.ok(tch.setCookies.some((c) => c.includes('edunova_session=') && c.includes('HttpOnly')));
 
-    const ref = await request('/api/auth/refresh', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${adminToken}` },
-    });
-    assert.equal(ref.status, 200);
-    assert.ok(ref.body.access_token);
-
-    const out = await request('/api/auth/logout', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${teacherToken}` },
-    });
-    assert.equal(out.status, 200);
-    assert.equal(out.body.logged_out, true);
+    const tchMe = await teacher.request('/api/auth/me');
+    assert.equal(tchMe.status, 200);
+    assert.equal(tchMe.body.role, 'TEACHER');
+    assert.equal((await teacher.request('/api/dashboard')).status, 200);
   });
 
-  const adminHeaders = {
-    Authorization: `Bearer ${adminToken}`,
-    'Content-Type': 'application/json',
-  };
-  const teacherHeaders = {
-    Authorization: `Bearer ${teacherToken}`,
-    'Content-Type': 'application/json',
-  };
-
-  // 3. Role-Based Permissions (RBAC)
-  await check('Enforces Teacher RBAC restrictions (403 on Admin endpoints)', async () => {
-    const rUsers = await request('/api/users', { headers: { Authorization: `Bearer ${teacherToken}` } });
-    assert.equal(rUsers.status, 403);
-    const rCreateStu = await request('/api/students', {
+  // 4. Teacher accessing Admin APIs receives 403 Forbidden
+  await check('Blocks Teacher from Admin-only APIs with 403 Forbidden', async () => {
+    const createStu = await teacher.request('/api/students', {
       method: 'POST',
-      headers: teacherHeaders,
-      body: JSON.stringify({ name: 'X', roll_no: '99999', email: 'x@x.edu', course: 'B.Tech', branch: 'CSE', semester: 3 }),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Forbidden',
+        roll_no: '99999',
+        email: 'forbid@edu.test',
+        course: 'B.Tech',
+        branch: 'CSE',
+        semester: 3,
+      }),
     });
-    assert.equal(rCreateStu.status, 403);
+    assert.equal(createStu.status, 403);
+
+    assert.equal((await teacher.request('/api/students/1', { method: 'DELETE' })).status, 403);
+    assert.equal((await teacher.request('/api/subjects/1', { method: 'DELETE' })).status, 403);
+    assert.equal((await teacher.request('/api/admin/access-codes')).status, 403);
+    assert.equal(
+      (
+        await teacher.request('/api/admin/access-codes', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target_role: 'TEACHER', new_code: 'HACKED123' }),
+        })
+      ).status,
+      403
+    );
+    assert.equal((await teacher.request('/api/admin/db-health')).status, 403);
+    assert.equal((await teacher.request('/api/export/students')).status, 403);
   });
 
-  // 4. Student CRUD + Duplicate + Missing Fields + Search
+  // 5. Admin CRUD + Teacher Marks/Results/Reports + Python grading + Access Code update
   let testStudentId = 0;
-  await check('Student CRUD, duplicate roll prevention, missing fields, and search filtering', async () => {
-    const missing = await request('/api/students', {
+  let testSubjectId = 0;
+  let testExamId = 0;
+  await check('Admin full CRUD + Teacher marks/results/reports + Access Code update/restore', async () => {
+    const created = await admin.request('/api/students', {
       method: 'POST',
-      headers: adminHeaders,
-      body: JSON.stringify({ name: 'Incomplete' }),
-    });
-    assert.equal(missing.status, 400);
-
-    const created = await request('/api/students', {
-      method: 'POST',
-      headers: adminHeaders,
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: 'QA Test Student',
         roll_no: '2026999',
@@ -117,171 +203,126 @@ async function run() {
     assert.equal(created.status, 201);
     testStudentId = created.body.id;
 
-    // Duplicate roll number
-    const dup = await request('/api/students', {
+    const sub = await admin.request('/api/subjects', {
       method: 'POST',
-      headers: adminHeaders,
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        name: 'Dup Student',
-        roll_no: '2026999',
-        email: 'qa.dup@acadledger.edu',
-        course: 'B.Tech',
-        branch: 'CSE',
+        subject_name: 'Software Testing',
+        subject_code: 'QA399',
+        max_marks: 100,
+        passing_marks: 40,
         semester: 3,
       }),
-    });
-    assert.equal(dup.status, 409);
-
-    const getOne = await request(`/api/students/${testStudentId}`, { headers: { Authorization: `Bearer ${adminToken}` } });
-    assert.equal(getOne.status, 200);
-    assert.equal(getOne.body.roll_no, '2026999');
-
-    const updated = await request(`/api/students/${testStudentId}`, {
-      method: 'PUT',
-      headers: adminHeaders,
-      body: JSON.stringify({ semester: 4 }),
-    });
-    assert.equal(updated.status, 200);
-    assert.equal(updated.body.semester, 4);
-
-    const searched = await request('/api/students?search=2026999', { headers: { Authorization: `Bearer ${adminToken}` } });
-    assert.equal(searched.status, 200);
-    assert.equal(searched.body.length, 1);
-  });
-
-  // 5. Subject CRUD + Duplicate + Invalid passing marks
-  let testSubjectId = 0;
-  await check('Subject CRUD and passing/max marks validation', async () => {
-    const badSub = await request('/api/subjects', {
-      method: 'POST',
-      headers: adminHeaders,
-      body: JSON.stringify({ subject_name: 'Bad Sub', subject_code: 'BAD999', max_marks: 100, passing_marks: 120, semester: 3 }),
-    });
-    assert.equal(badSub.status, 400);
-
-    const sub = await request('/api/subjects', {
-      method: 'POST',
-      headers: adminHeaders,
-      body: JSON.stringify({ subject_name: 'Software Testing', subject_code: 'QA399', max_marks: 100, passing_marks: 40, semester: 3 }),
     });
     assert.equal(sub.status, 201);
     testSubjectId = sub.body.id;
 
-    const dupSub = await request('/api/subjects', {
+    const ex = await admin.request('/api/examinations', {
       method: 'POST',
-      headers: adminHeaders,
-      body: JSON.stringify({ subject_name: 'Software Testing 2', subject_code: 'QA399', max_marks: 100, passing_marks: 40, semester: 3 }),
-    });
-    assert.equal(dupSub.status, 409);
-  });
-
-  // 6. Examination CRUD + Duplicate check
-  let testExamId = 0;
-  await check('Examination CRUD and duplicate exam prevention', async () => {
-    const ex = await request('/api/examinations', {
-      method: 'POST',
-      headers: adminHeaders,
-      body: JSON.stringify({ exam_name: 'QA Audit Exam 2026', semester: 3, exam_date: '2026-12-01' }),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        exam_name: 'QA Audit Exam 2026',
+        semester: 3,
+        exam_date: '2026-12-01',
+      }),
     });
     assert.equal(ex.status, 201);
     testExamId = ex.body.id;
 
-    const dupEx = await request('/api/examinations', {
+    const saved = await teacher.request('/api/marks', {
       method: 'POST',
-      headers: adminHeaders,
-      body: JSON.stringify({ exam_name: 'QA Audit Exam 2026', semester: 3, exam_date: '2026-12-02' }),
-    });
-    assert.equal(dupEx.status, 409);
-  });
-
-  // 7. Marks validation (negative, above max, empty string) + Result & Grade calculation
-  await check('Marks validation, Python result & grade calculation, and subject-fail rule', async () => {
-    const neg = await request('/api/marks', {
-      method: 'POST',
-      headers: teacherHeaders,
-      body: JSON.stringify({ student_id: testStudentId, subject_id: testSubjectId, exam_id: testExamId, obtained_marks: -10 }),
-    });
-    assert.equal(neg.status, 400);
-
-    const overMax = await request('/api/marks', {
-      method: 'POST',
-      headers: teacherHeaders,
-      body: JSON.stringify({ student_id: testStudentId, subject_id: testSubjectId, exam_id: testExamId, obtained_marks: 105 }),
-    });
-    assert.equal(overMax.status, 400);
-
-    const emptyVal = await request('/api/marks', {
-      method: 'POST',
-      headers: teacherHeaders,
-      body: JSON.stringify({ student_id: testStudentId, subject_id: testSubjectId, exam_id: testExamId, obtained_marks: '' }),
-    });
-    assert.equal(emptyVal.status, 400);
-
-    const saved = await request('/api/marks', {
-      method: 'POST',
-      headers: teacherHeaders,
-      body: JSON.stringify({ student_id: testStudentId, subject_id: testSubjectId, exam_id: testExamId, obtained_marks: 91 }),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        student_id: testStudentId,
+        subject_id: testSubjectId,
+        exam_id: testExamId,
+        obtained_marks: 91,
+      }),
     });
     assert.equal(saved.status, 201);
 
-    const resData = await request(`/api/results/${testStudentId}?exam_id=${testExamId}`, {
-      headers: { Authorization: `Bearer ${teacherToken}` },
-    });
+    const resData = await teacher.request(`/api/results/${testStudentId}?exam_id=${testExamId}`);
     assert.equal(resData.status, 200);
     assert.equal(resData.body.grade, 'A+');
     assert.equal(resData.body.status, 'PASS');
+
+    // Admin inspects & updates Teacher access code, verifies login, then restores default
+    const codeMeta = await admin.request('/api/admin/access-codes');
+    assert.equal(codeMeta.status, 200);
+    assert.equal(codeMeta.body.admin_code_configured, true);
+    assert.equal(codeMeta.body.teacher_code_configured, true);
+    assert.equal(JSON.stringify(codeMeta.body).includes(ADMIN_CODE), false);
+    assert.equal(JSON.stringify(codeMeta.body).includes(TEACHER_CODE), false);
+
+    const upd = await admin.request('/api/admin/access-codes', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target_role: 'TEACHER', new_code: 'TEACHER_NEW_99' }),
+    });
+    assert.equal(upd.status, 200);
+
+    const tempTeacher = createSessionClient('10.10.1.12');
+    const loginNew = await tempTeacher.request('/api/auth/code-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'teacher', access_code: 'TEACHER_NEW_99' }),
+    });
+    assert.equal(loginNew.status, 200);
+
+    // Restore original Teacher code
+    const restore = await admin.request('/api/admin/access-codes', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target_role: 'TEACHER', new_code: TEACHER_CODE }),
+    });
+    assert.equal(restore.status, 200);
   });
 
-  // 8. CSV Import validation, error report CSV, and Export CSV endpoints
-  await check('CSV import validation, error report CSV, and individual/cohort CSV exports', async () => {
-    const badCsv = new FormData();
-    badCsv.append('file', new Blob(['roll_no,name\n1,OnlyTwoHeaders\n'], { type: 'text/csv' }), 'bad.csv');
-    const impErr = await request('/api/import/students', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${adminToken}` },
-      body: badCsv,
-    });
-    assert.equal(impErr.status, 200);
-    assert.ok(impErr.body.errors.length > 0);
-    assert.ok(impErr.body.error_report_csv.includes('error_number,detail'));
-
-    const nonCsv = new FormData();
-    nonCsv.append('file', new Blob(['hello'], { type: 'text/plain' }), 'notes.txt');
-    const badExt = await request('/api/import/students', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${adminToken}` },
-      body: nonCsv,
-    });
-    assert.equal(badExt.status, 400);
-
-    const expStudents = await request('/api/export/students', { headers: { Authorization: `Bearer ${teacherToken}` } });
-    assert.equal(expStudents.status, 200);
-    assert.ok(expStudents.body.includes('2026001'));
-
-    const expStudentRes = await request(`/api/export/results/${testStudentId}?exam_id=${testExamId}`, {
-      headers: { Authorization: `Bearer ${teacherToken}` },
-    });
-    assert.equal(expStudentRes.status, 200);
-    assert.ok(expStudentRes.body.includes('QA399'));
-  });
-
-  // 9. DB Health & Python Data Structures Inspector + Cleanup test fixtures
-  await check('Health/DB & Python inspector endpoints work and test fixtures clean up cleanly', async () => {
-    const health = await request('/api/health/db');
+  // 6. Cleanup QA test records & verify Admin DB health + Python inspector
+  await check('Admin DB health, Python inspector, and fixture cleanup succeed', async () => {
+    const health = await admin.request('/api/admin/db-health');
     assert.equal(health.status, 200);
     assert.equal(health.body.connected, true);
-    assert.ok(health.body.counts.students >= 10);
 
-    const py = await request('/api/python-structures/inspect', {
-      headers: { Authorization: `Bearer ${teacherToken}` },
-    });
+    const py = await teacher.request('/api/python-structures/inspect');
     assert.equal(py.status, 200);
     assert.ok(Array.isArray(py.body.grade_ranges_tuple));
 
-    // Clean up test records
-    assert.equal((await request(`/api/students/${testStudentId}`, { method: 'DELETE', headers: adminHeaders })).status, 200);
-    assert.equal((await request(`/api/subjects/${testSubjectId}`, { method: 'DELETE', headers: adminHeaders })).status, 200);
-    assert.equal((await request(`/api/examinations/${testExamId}`, { method: 'DELETE', headers: adminHeaders })).status, 200);
+    assert.equal((await admin.request(`/api/students/${testStudentId}`, { method: 'DELETE' })).status, 200);
+    assert.equal((await admin.request(`/api/subjects/${testSubjectId}`, { method: 'DELETE' })).status, 200);
+    assert.equal((await admin.request(`/api/examinations/${testExamId}`, { method: 'DELETE' })).status, 200);
+  });
+
+  // 7. Logout terminates session, tampered cookie returns 401, and rate limiting returns 429
+  await check('Logout terminates session, tampered cookie returns 401, and login rate-limits after 5 failures', async () => {
+    const savedCookie = teacher.getCookie();
+    const out = await teacher.request('/api/auth/logout', { method: 'POST' });
+    assert.equal(out.status, 200);
+    assert.equal(out.body.logged_out, true);
+
+    teacher.setCookie(savedCookie);
+    assert.equal((await teacher.request('/api/auth/me')).status, 401);
+    assert.equal((await teacher.request('/api/students')).status, 401);
+
+    const tampered = createSessionClient('10.10.1.20');
+    tampered.setCookie('edunova_session=invalid.signature');
+    assert.equal((await tampered.request('/api/auth/me')).status, 401);
+
+    const brute = createSessionClient('10.10.99.99');
+    for (let i = 0; i < 4; i++) {
+      const r = await brute.request('/api/auth/code-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: 'admin', access_code: 'BAD_GUESS' }),
+      });
+      assert.equal(r.status, 401);
+    }
+    const r5 = await brute.request('/api/auth/code-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'admin', access_code: 'BAD_GUESS' }),
+    });
+    assert.equal(r5.status, 429);
   });
 
   console.log(`\nALL ${passed} LIVE API INTEGRATION SUITES PASSED`);

@@ -8,7 +8,8 @@ import {
   useNavigate,
 } from 'react-router-dom';
 import { X } from 'lucide-react';
-import { api, getStoredToken, setStoredToken } from './services/api';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { api } from './services/api';
 import type { AuthUser, DashboardPayload, Examination } from './types';
 import { LoginView } from './components/LoginView';
 import { Sidebar, SIDEBAR_NAV_ITEMS } from './components/Sidebar';
@@ -29,7 +30,6 @@ import { GradesPage } from './pages/GradesPage';
 import { ReportsPage } from './pages/ReportsPage';
 import { ImportExportPage } from './pages/ImportExportPage';
 import { PythonInspectorPage } from './pages/PythonInspectorPage';
-import { UsersPage } from './pages/UsersPage';
 import { SettingsPage } from './pages/SettingsPage';
 
 function resolvePageTitle(pathname: string): string {
@@ -84,6 +84,7 @@ const WorkspaceShell: React.FC<WorkspaceShellProps> = ({
           dashboard={dashboard}
           onOpenMobileMenu={() => setMobileMenuOpen(true)}
           onOpenAiDrawer={() => setAiDrawerOpen(true)}
+          onLogout={onLogout}
         />
 
         <main
@@ -238,16 +239,12 @@ const WorkspaceShell: React.FC<WorkspaceShellProps> = ({
             <Route path="/ai-advisor" element={<AIChatPanel examId={selectedExamId} />} />
             <Route path="/python-inspector" element={<PythonInspectorPage />} />
             <Route
-              path="/users"
+              path="/settings"
               element={
                 <ProtectedRoute user={user} requireAdmin>
-                  <UsersPage currentUser={user} onNotify={onNotify} />
+                  <SettingsPage currentUser={user} onNotify={onNotify} onLogout={onLogout} />
                 </ProtectedRoute>
               }
-            />
-            <Route
-              path="/settings"
-              element={<SettingsPage currentUser={user} onNotify={onNotify} />}
             />
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
@@ -255,7 +252,7 @@ const WorkspaceShell: React.FC<WorkspaceShellProps> = ({
         </main>
       </div>
 
-      <MobileBottomNav />
+      <MobileBottomNav user={user} />
 
       {/* Slide-over Quick AI Advisor Drawer */}
       {aiDrawerOpen && (
@@ -285,8 +282,7 @@ const WorkspaceShell: React.FC<WorkspaceShellProps> = ({
 
 const AppRoutes: React.FC = () => {
   const navigate = useNavigate();
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [authChecking, setAuthChecking] = useState(true);
+  const { user, authChecking, sessionExpiredMessage, loginWithCode, logout } = useAuth();
 
   const [examinations, setExaminations] = useState<Examination[]>([]);
   const [selectedExamId, setSelectedExamId] = useState<number>(2);
@@ -322,40 +318,17 @@ const AppRoutes: React.FC = () => {
   );
 
   useEffect(() => {
-    const token = getStoredToken();
-    if (!token) {
-      setAuthChecking(false);
-      return;
-    }
-    api
-      .me()
-      .then((res) => {
-        setUser(res.user);
-      })
-      .catch(() => {
-        setStoredToken(null);
-        setUser(null);
-      })
-      .finally(() => setAuthChecking(false));
-  }, []);
-
-  useEffect(() => {
     if (user) {
       loadWorkspaceData(selectedExamId);
+    } else {
+      setDashboard(null);
     }
   }, [user, selectedExamId]);
 
   const handleLogout = async () => {
-    try {
-      await api.logout();
-    } catch {
-      // Clear local session regardless of network outcome
-    } finally {
-      setStoredToken(null);
-      setUser(null);
-      setDashboard(null);
-      navigate('/login', { replace: true });
-    }
+    await logout();
+    setDashboard(null);
+    navigate('/login', { replace: true });
   };
 
   if (authChecking) {
@@ -376,10 +349,9 @@ const AppRoutes: React.FC = () => {
               <Navigate to="/dashboard" replace />
             ) : (
               <LoginView
-                onSuccess={(u) => {
-                  setUser(u);
-                  navigate('/dashboard', { replace: true });
-                }}
+                onLogin={loginWithCode}
+                sessionExpiredMessage={sessionExpiredMessage}
+                onSuccess={() => navigate('/dashboard', { replace: true })}
               />
             )
           }
@@ -423,7 +395,9 @@ const AppRoutes: React.FC = () => {
 export default function App() {
   return (
     <BrowserRouter>
-      <AppRoutes />
+      <AuthProvider>
+        <AppRoutes />
+      </AuthProvider>
     </BrowserRouter>
   );
 }

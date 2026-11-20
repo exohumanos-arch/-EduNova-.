@@ -1,5 +1,6 @@
 import axios from 'axios';
 import type {
+  AccessCodeStatus,
   AuthUser,
   CohortAIInsights,
   DashboardPayload,
@@ -11,29 +12,48 @@ import type {
   Subject,
 } from '../types';
 
-const TOKEN_KEY = 'acadledger_jwt_token';
+const SESSION_TOKEN_KEY = 'edunova_session_token';
 
-export function getStoredToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY);
+export function getStoredSessionToken(): string | null {
+  try {
+    return typeof window !== 'undefined' ? window.sessionStorage.getItem(SESSION_TOKEN_KEY) : null;
+  } catch {
+    return null;
+  }
 }
 
-export function setStoredToken(token: string | null) {
-  if (token) {
-    localStorage.setItem(TOKEN_KEY, token);
-  } else {
-    localStorage.removeItem(TOKEN_KEY);
+export function setStoredSessionToken(token: string | null) {
+  try {
+    if (typeof window === 'undefined') return;
+    if (token) {
+      window.sessionStorage.setItem(SESSION_TOKEN_KEY, token);
+    } else {
+      window.sessionStorage.removeItem(SESSION_TOKEN_KEY);
+    }
+  } catch {
+    // Ignore storage restriction errors in sandboxed contexts
   }
+}
+
+let unauthorizedHandler: (() => void) | null = null;
+
+export function setUnauthorizedHandler(handler: (() => void) | null) {
+  unauthorizedHandler = handler;
 }
 
 export const http = axios.create({
   baseURL: '',
+  withCredentials: true,
   timeout: 30000,
 });
 
 http.interceptors.request.use((config) => {
-  const token = getStoredToken();
+  const token = getStoredSessionToken();
   if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
+    config.headers = config.headers ?? {};
+    if (!config.headers.Authorization) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
   }
   return config;
 });
@@ -42,8 +62,17 @@ http.interceptors.response.use(
   (response) => response,
   (error) => {
     const status = error?.response?.status;
-    if (status === 401) {
-      setStoredToken(null);
+    const url = String(error?.config?.url || '');
+    if (
+      status === 401 &&
+      !url.includes('/api/auth/code-login') &&
+      !url.includes('/api/auth/me') &&
+      !url.includes('/api/auth/logout')
+    ) {
+      setStoredSessionToken(null);
+      if (unauthorizedHandler) {
+        unauthorizedHandler();
+      }
     }
     const msg =
       error?.response?.data?.error ||
@@ -66,29 +95,86 @@ function triggerBlobDownload(blob: Blob, filename: string) {
 }
 
 export const api = {
-  // Auth
-  login: async (email: string, password: string) =>
-    (await http.post<{ access_token: string; user: AuthUser }>('/api/auth/login', { email, password })).data,
-  register: async (username: string, email: string, password: string, role: 'ADMIN' | 'TEACHER') =>
-    (await http.post<{ access_token: string; user: AuthUser }>('/api/auth/register', { username, email, password, role })).data,
-  logout: async () => (await http.post<{ logged_out: boolean }>('/api/auth/logout')).data,
-  refresh: async () => (await http.post<{ access_token: string }>('/api/auth/refresh')).data,
-  me: async () => (await http.get<{ user: AuthUser }>('/api/auth/me')).data,
+  // Role-Based Access Code Auth (HttpOnly Cookie + Server-Tracked Session Token)
+  codeLogin: async (role: 'admin' | 'teacher', access_code: string) => {
+    const data = (
+      await http.post<{
+        authenticated: boolean;
+        role: 'ADMIN' | 'TEACHER';
+        user: AuthUser;
+        session_token?: string;
+        expires_at?: string;
+      }>('/api/auth/code-login', { role, access_code })
+    ).data;
+    if (data.session_token) {
+      setStoredSessionToken(data.session_token);
+    }
+    return data;
+  },
+  logout: async () => {
+    try {
+      return (await http.post<{ logged_out: boolean }>('/api/auth/logout')).data;
+    } finally {
+      setStoredSessionToken(null);
+    }
+  },
+  refresh: async () => {
+    const data = (
+      await http.post<{
+        refreshed: boolean;
+        role: 'ADMIN' | 'TEACHER';
+        user: AuthUser;
+        session_token?: string;
+        expires_at?: string;
+      }>('/api/auth/refresh')
+    ).data;
+    if (data.session_token) {
+      setStoredSessionToken(data.session_token);
+    }
+    return data;
+  },
+  me: async () =>
+    (
+      await http.get<{
+        authenticated: boolean;
+        role: 'ADMIN' | 'TEACHER';
+        user: AuthUser;
+        expires_at?: string;
+      }>('/api/auth/me')
+    ).data,
 
-  // Users
-  getUsers: async () => (await http.get<AuthUser[]>('/api/users')).data,
-  createUser: async (payload: { username: string; email: string; password: string; role: 'ADMIN' | 'TEACHER' }) =>
-    (await http.post<AuthUser>('/api/users', payload)).data,
-  deleteUser: async (id: number) => (await http.delete<{ deleted: boolean }>(`/api/users/${id}`)).data,
+  // Admin Access Code Configuration
+  getAccessCodeStatus: async () =>
+    (await http.get<AccessCodeStatus>('/api/admin/access-codes')).data,
+  updateAccessCode: async (payload: {
+    target_role: 'TEACHER' | 'ADMIN';
+    new_code: string;
+    current_admin_code?: string;
+  }) =>
+    (
+      await http.put<{ updated: boolean; target_role: 'TEACHER' | 'ADMIN'; updated_at: string }>(
+        '/api/admin/access-codes',
+        payload
+      )
+    ).data,
+  getAdminDbHealth: async () =>
+    (await http.get<Record<string, unknown>>('/api/admin/db-health')).data,
 
   // Dashboard & Results
   getDashboard: async (examId?: number) =>
-    (await http.get<DashboardPayload>('/api/dashboard', { params: examId ? { exam_id: examId } : undefined })).data,
-  getResults: async (examId?: number) =>
     (
-      await http.get<{ results: StudentResult[]; summary: DashboardPayload['summary'] }>('/api/results', {
+      await http.get<DashboardPayload>('/api/dashboard', {
         params: examId ? { exam_id: examId } : undefined,
       })
+    ).data,
+  getResults: async (examId?: number) =>
+    (
+      await http.get<{ results: StudentResult[]; summary: DashboardPayload['summary'] }>(
+        '/api/results',
+        {
+          params: examId ? { exam_id: examId } : undefined,
+        }
+      )
     ).data,
   getStudentResult: async (studentId: number, examId?: number) =>
     (
@@ -110,14 +196,17 @@ export const api = {
     (await http.post<Student>('/api/students', payload)).data,
   updateStudent: async (id: number, payload: Partial<Omit<Student, 'id'>>) =>
     (await http.put<Student>(`/api/students/${id}`, payload)).data,
-  deleteStudent: async (id: number) => (await http.delete<{ deleted: boolean }>(`/api/students/${id}`)).data,
+  deleteStudent: async (id: number) =>
+    (await http.delete<{ deleted: boolean }>(`/api/students/${id}`)).data,
 
   // Subjects
   getSubjects: async () => (await http.get<Subject[]>('/api/subjects')).data,
-  createSubject: async (payload: Omit<Subject, 'id'>) => (await http.post<Subject>('/api/subjects', payload)).data,
+  createSubject: async (payload: Omit<Subject, 'id'>) =>
+    (await http.post<Subject>('/api/subjects', payload)).data,
   updateSubject: async (id: number, payload: Partial<Omit<Subject, 'id'>>) =>
     (await http.put<Subject>(`/api/subjects/${id}`, payload)).data,
-  deleteSubject: async (id: number) => (await http.delete<{ deleted: boolean }>(`/api/subjects/${id}`)).data,
+  deleteSubject: async (id: number) =>
+    (await http.delete<{ deleted: boolean }>(`/api/subjects/${id}`)).data,
 
   // Examinations
   getExaminations: async () => (await http.get<Examination[]>('/api/examinations')).data,
@@ -125,7 +214,8 @@ export const api = {
     (await http.post<Examination>('/api/examinations', payload)).data,
   updateExamination: async (id: number, payload: Partial<Omit<Examination, 'id'>>) =>
     (await http.put<Examination>(`/api/examinations/${id}`, payload)).data,
-  deleteExamination: async (id: number) => (await http.delete<{ deleted: boolean }>(`/api/examinations/${id}`)).data,
+  deleteExamination: async (id: number) =>
+    (await http.delete<{ deleted: boolean }>(`/api/examinations/${id}`)).data,
 
   // Marks
   getMarks: async (examId?: number, studentId?: number) => {
@@ -134,29 +224,38 @@ export const api = {
     if (studentId) params.student_id = studentId;
     return (await http.get<MarkRecord[]>('/api/marks', { params })).data;
   },
-  saveMark: async (payload: { student_id: number; subject_id: number; exam_id: number; obtained_marks: number }) =>
-    (await http.post<{ id: number; updated?: boolean }>('/api/marks', payload)).data,
-  deleteMark: async (id: number) => (await http.delete<{ deleted: boolean }>(`/api/marks/${id}`)).data,
+  saveMark: async (payload: {
+    student_id: number;
+    subject_id: number;
+    exam_id: number;
+    obtained_marks: number;
+  }) => (await http.post<{ id: number; updated?: boolean }>('/api/marks', payload)).data,
+  deleteMark: async (id: number) =>
+    (await http.delete<{ deleted: boolean }>(`/api/marks/${id}`)).data,
 
   // CSV Import / Export
   importStudentsCSV: async (file: File) => {
     const fd = new FormData();
     fd.append('file', file);
     return (
-      await http.post<{ inserted: number; total_valid: number; errors: string[]; error_report_csv?: string }>(
-        '/api/import/students',
-        fd
-      )
+      await http.post<{
+        inserted: number;
+        total_valid: number;
+        errors: string[];
+        error_report_csv?: string;
+      }>('/api/import/students', fd)
     ).data;
   },
   importMarksCSV: async (file: File) => {
     const fd = new FormData();
     fd.append('file', file);
     return (
-      await http.post<{ upserted: number; total_valid: number; errors: string[]; error_report_csv?: string }>(
-        '/api/import/marks',
-        fd
-      )
+      await http.post<{
+        upserted: number;
+        total_valid: number;
+        errors: string[];
+        error_report_csv?: string;
+      }>('/api/import/marks', fd)
     ).data;
   },
   downloadExportCSV: async (type: 'students' | 'marks' | 'results', examId?: number) => {
@@ -175,7 +274,8 @@ export const api = {
   },
 
   // Python Data Structures & DB Health
-  inspectPythonStructures: async () => (await http.get<Record<string, unknown>>('/api/python-structures/inspect')).data,
+  inspectPythonStructures: async () =>
+    (await http.get<Record<string, unknown>>('/api/python-structures/inspect')).data,
   getDbHealth: async () => (await http.get<Record<string, unknown>>('/api/health/db')).data,
 
   // Gemini AI Endpoints

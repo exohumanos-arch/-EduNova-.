@@ -7,16 +7,15 @@ from typing import Literal, Optional
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str = Field(..., min_length=6)
+class CodeLoginRequest(BaseModel):
+    role: str = Field(..., min_length=4, max_length=16)
+    access_code: str = Field(..., min_length=1, max_length=128)
 
 
-class RegisterRequest(BaseModel):
-    username: str = Field(..., min_length=2, max_length=100)
-    email: EmailStr
-    password: str = Field(..., min_length=6)
-    role: Literal["ADMIN", "TEACHER"] = "TEACHER"
+class AccessCodeUpdateRequest(BaseModel):
+    target_role: Literal["ADMIN", "TEACHER"]
+    new_code: str = Field(..., min_length=6, max_length=64)
+    current_admin_code: Optional[str] = None
 
 
 class StudentCreate(BaseModel):

@@ -1,25 +1,23 @@
 import React, { useState } from 'react';
 import {
-  Lock,
-  Mail,
-  User,
   AlertCircle,
-  BarChart3,
   Award,
+  BarChart3,
+  CheckCircle2,
   FileSpreadsheet,
   ShieldCheck,
-  CheckCircle2,
-  X,
 } from 'lucide-react';
-import { api, setStoredToken } from '../services/api';
+import { api } from '../services/api';
 import type { AuthUser } from '../types';
+import { CodeLogin } from './CodeLogin';
 import { EduNovaLogo } from './EduNovaLogo';
+import { RoleSelection } from './RoleSelection';
 
 interface LoginViewProps {
-  onSuccess: (user: AuthUser) => void;
+  onSuccess?: (user: AuthUser) => void;
+  onLogin?: (role: 'admin' | 'teacher', accessCode: string) => Promise<AuthUser>;
+  sessionExpiredMessage?: string | null;
 }
-
-const REMEMBER_EMAIL_KEY = 'edunova_remembered_email';
 
 const HIGHLIGHTS = [
   {
@@ -43,62 +41,36 @@ const HIGHLIGHTS = [
   {
     icon: ShieldCheck,
     tone: 'bg-[#EAF2FF] text-[#3B82F6]',
-    title: 'Role-Based Access Control',
-    desc: 'Signed JWT authentication for Administrators and Teachers.',
+    title: 'Role-Based Session Security',
+    desc: 'Signed session authentication for Admin and Teacher portals.',
   },
 ];
 
-export const LoginView: React.FC<LoginViewProps> = ({ onSuccess }) => {
-  const savedEmail =
-    typeof window !== 'undefined' ? localStorage.getItem(REMEMBER_EMAIL_KEY) : null;
-
-  const [mode, setMode] = useState<'login' | 'register'>('login');
-  const [username, setUsername] = useState('');
-  const [email, setEmail] = useState(savedEmail || 'admin@acadledger.edu');
-  const [password, setPassword] = useState('Admin@2026');
-  const [rememberMe, setRememberMe] = useState(Boolean(savedEmail ?? true));
-  const [role, setRole] = useState<'ADMIN' | 'TEACHER'>('TEACHER');
+export const LoginView: React.FC<LoginViewProps> = ({
+  onSuccess,
+  onLogin,
+  sessionExpiredMessage = null,
+}) => {
+  const [selectedRole, setSelectedRole] = useState<'admin' | 'teacher' | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [forgotOpen, setForgotOpen] = useState(false);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSelectRole = (role: 'admin' | 'teacher') => {
+    setSelectedRole(role);
     setError(null);
-    setLoading(true);
-    try {
-      const res =
-        mode === 'login'
-          ? await api.login(email, password)
-          : await api.register(username, email, password, role);
-      if (rememberMe && typeof window !== 'undefined') {
-        localStorage.setItem(REMEMBER_EMAIL_KEY, email);
-      } else if (typeof window !== 'undefined') {
-        localStorage.removeItem(REMEMBER_EMAIL_KEY);
-      }
-      setStoredToken(res.access_token);
-      onSuccess(res.user);
-    } catch (err: any) {
-      setError(err?.message || 'Authentication failed');
-    } finally {
-      setLoading(false);
-    }
   };
 
-  const quickLogin = async (presetEmail: string, presetPassword: string) => {
+  const handleCodeSubmit = async (accessCode: string) => {
+    if (!selectedRole) return;
     setError(null);
-    setEmail(presetEmail);
-    setPassword(presetPassword);
     setLoading(true);
     try {
-      const res = await api.login(presetEmail, presetPassword);
-      if (rememberMe && typeof window !== 'undefined') {
-        localStorage.setItem(REMEMBER_EMAIL_KEY, presetEmail);
-      }
-      setStoredToken(res.access_token);
-      onSuccess(res.user);
+      const authenticatedUser = onLogin
+        ? await onLogin(selectedRole, accessCode)
+        : (await api.codeLogin(selectedRole, accessCode)).user;
+      onSuccess?.(authenticatedUser);
     } catch (err: any) {
-      setError(err?.message || 'Sign-in failed');
+      setError(err?.message || 'Invalid access code. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -145,7 +117,6 @@ export const LoginView: React.FC<LoginViewProps> = ({ onSuccess }) => {
             })}
           </div>
 
-          {/* Mini Workspace Preview Strip */}
           <div className="edunova-card p-4 flex items-center justify-between gap-4 bg-white/90">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#7357E8] to-[#4935A8] text-white flex items-center justify-center shrink-0">
@@ -169,237 +140,51 @@ export const LoginView: React.FC<LoginViewProps> = ({ onSuccess }) => {
         </p>
       </div>
 
-      {/* Right Auth Card Column */}
+      {/* Right Access-Code Auth Card Column */}
       <div className="lg:col-span-6 flex items-center justify-center p-6 lg:p-12">
         <div className="w-full max-w-md edunova-card p-8">
           <div className="pb-5 mb-6 border-b border-[#ECEBF3]">
-            <h2 className="font-display text-xl font-bold text-[#24243A]">
-              {mode === 'login' ? 'Sign in to workspace' : 'Create faculty account'}
+            <h2 className="font-display text-2xl font-bold text-[#24243A]">
+              Welcome to EduNova
             </h2>
             <p className="text-xs text-[#85859B] mt-1">
-              {mode === 'login'
-                ? 'Access your EduNova marks ledger, grades, and reports.'
-                : 'Register an administrator or teacher profile.'}
+              Select your role and enter your access code.
             </p>
           </div>
 
-          {/* Mode Toggle */}
-          <div className="flex gap-1 p-1 bg-[#F7F7FC] border border-[#ECEBF3] rounded-xl mb-6">
-            <button
-              type="button"
-              onClick={() => {
-                setMode('login');
-                setError(null);
-              }}
-              className={`flex-1 py-2 text-xs font-semibold rounded-lg transition-colors ${
-                mode === 'login'
-                  ? 'bg-white text-[#7357E8] shadow-sm'
-                  : 'text-[#85859B] hover:text-[#24243A]'
-              }`}
+          {sessionExpiredMessage && (
+            <div
+              role="status"
+              className="mb-5 flex items-start gap-2 rounded-xl border border-[#F4A340]/40 bg-[#FFF4E4] p-3 text-xs text-[#B56E10]"
             >
-              Sign In
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setMode('register');
-                setError(null);
-              }}
-              className={`flex-1 py-2 text-xs font-semibold rounded-lg transition-colors ${
-                mode === 'register'
-                  ? 'bg-white text-[#7357E8] shadow-sm'
-                  : 'text-[#85859B] hover:text-[#24243A]'
-              }`}
-            >
-              Register Account
-            </button>
-          </div>
-
-          {error && (
-            <div className="mb-5 flex items-start gap-2 rounded-xl border border-[#EF6262]/30 bg-[#FDECEC] p-3 text-xs text-[#C23E3E]">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-              <span>{error}</span>
+              <span>{sessionExpiredMessage}</span>
             </div>
           )}
 
-          <form onSubmit={handleSubmit} className="space-y-4">
-            {mode === 'register' && (
-              <div>
-                <label className="block text-xs font-semibold text-[#24243A] mb-1.5">
-                  Full Name
-                </label>
-                <div className="relative">
-                  <User className="w-4 h-4 text-[#85859B] absolute left-3.5 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    required
-                    value={username}
-                    onChange={(e) => setUsername(e.target.value)}
-                    placeholder="Prof. Rajesh Kulkarni"
-                    className="w-full rounded-xl border border-[#ECEBF3] bg-[#F7F7FC] pl-10 pr-3.5 py-2.5 text-sm text-[#24243A] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#7357E8]/30 focus:border-[#7357E8]"
-                  />
-                </div>
-              </div>
-            )}
+          <RoleSelection
+            selectedRole={selectedRole}
+            onSelectRole={handleSelectRole}
+            disabled={loading}
+          />
 
-            <div>
-              <label className="block text-xs font-semibold text-[#24243A] mb-1.5">
-                Email Address
-              </label>
-              <div className="relative">
-                <Mail className="w-4 h-4 text-[#85859B] absolute left-3.5 top-1/2 -translate-y-1/2" />
-                <input
-                  type="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="name@acadledger.edu"
-                  className="w-full rounded-xl border border-[#ECEBF3] bg-[#F7F7FC] pl-10 pr-3.5 py-2.5 text-sm text-[#24243A] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#7357E8]/30 focus:border-[#7357E8]"
-                />
-              </div>
+          {selectedRole ? (
+            <CodeLogin
+              role={selectedRole}
+              onSubmit={handleCodeSubmit}
+              loading={loading}
+              error={error}
+            />
+          ) : (
+            <div className="mt-6 pt-5 border-t border-[#ECEBF3] text-center">
+              <p className="text-xs text-[#85859B]">
+                Choose <span className="font-semibold text-[#24243A]">Admin</span> or{' '}
+                <span className="font-semibold text-[#24243A]">Teacher</span> above to enter your access code.
+              </p>
             </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-[#24243A] mb-1.5">
-                Password
-              </label>
-              <div className="relative">
-                <Lock className="w-4 h-4 text-[#85859B] absolute left-3.5 top-1/2 -translate-y-1/2" />
-                <input
-                  type="password"
-                  required
-                  minLength={6}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Minimum 6 characters"
-                  className="w-full rounded-xl border border-[#ECEBF3] bg-[#F7F7FC] pl-10 pr-3.5 py-2.5 text-sm text-[#24243A] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#7357E8]/30 focus:border-[#7357E8]"
-                />
-              </div>
-            </div>
-
-            {mode === 'login' && (
-              <div className="flex items-center justify-between text-xs pt-0.5">
-                <label className="inline-flex items-center gap-2 text-[#85859B] cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={rememberMe}
-                    onChange={(e) => setRememberMe(e.target.checked)}
-                    className="rounded border-[#ECEBF3] text-[#7357E8] focus:ring-[#7357E8]"
-                  />
-                  <span>Remember me</span>
-                </label>
-
-                <button
-                  type="button"
-                  onClick={() => setForgotOpen(true)}
-                  className="font-semibold text-[#7357E8] hover:text-[#4935A8]"
-                >
-                  Forgot Password?
-                </button>
-              </div>
-            )}
-
-            {mode === 'register' && (
-              <div>
-                <label className="block text-xs font-semibold text-[#24243A] mb-1.5">
-                  Account Role
-                </label>
-                <select
-                  value={role}
-                  onChange={(e) => setRole(e.target.value as 'ADMIN' | 'TEACHER')}
-                  className="w-full rounded-xl border border-[#ECEBF3] bg-[#F7F7FC] px-3.5 py-2.5 text-sm text-[#24243A] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#7357E8]/30 focus:border-[#7357E8]"
-                >
-                  <option value="TEACHER">Teacher (Marks Entry &amp; Results)</option>
-                  <option value="ADMIN">Administrator (Full CRUD &amp; Users)</option>
-                </select>
-              </div>
-            )}
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full rounded-xl bg-gradient-to-r from-[#7357E8] to-[#4935A8] px-4 py-2.5 text-sm font-semibold text-white hover:opacity-95 transition-opacity disabled:opacity-60 shadow-[0_6px_18px_rgba(115,87,232,0.28)]"
-            >
-              {loading
-                ? 'Authenticating...'
-                : mode === 'login'
-                ? 'Sign In'
-                : 'Create Account & Sign In'}
-            </button>
-          </form>
-
-          {/* Instant Demo Credentials */}
-          <div className="mt-7 pt-6 border-t border-[#ECEBF3]">
-            <p className="text-xs font-semibold text-[#85859B] mb-3">Quick Demo Access</p>
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                type="button"
-                disabled={loading}
-                onClick={() => quickLogin('admin@acadledger.edu', 'Admin@2026')}
-                className="rounded-xl border border-[#ECEBF3] bg-[#F7F7FC] px-3 py-2.5 text-left hover:border-[#7357E8] hover:bg-[#EEE9FF]/50 transition-colors"
-              >
-                <div className="text-xs font-semibold text-[#24243A]">Admin Account</div>
-                <div className="text-[11px] text-[#85859B] font-mono truncate">
-                  admin@acadledger.edu
-                </div>
-              </button>
-              <button
-                type="button"
-                disabled={loading}
-                onClick={() => quickLogin('teacher@acadledger.edu', 'Teacher@2026')}
-                className="rounded-xl border border-[#ECEBF3] bg-[#F7F7FC] px-3 py-2.5 text-left hover:border-[#7357E8] hover:bg-[#EEE9FF]/50 transition-colors"
-              >
-                <div className="text-xs font-semibold text-[#24243A]">Teacher Account</div>
-                <div className="text-[11px] text-[#85859B] font-mono truncate">
-                  teacher@acadledger.edu
-                </div>
-              </button>
-            </div>
-          </div>
+          )}
         </div>
       </div>
-
-      {/* Forgot Password Helper Modal */}
-      {forgotOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-[#24243A]/40 p-4"
-          onClick={() => setForgotOpen(false)}
-        >
-          <div
-            className="w-full max-w-sm edunova-card p-6 space-y-4"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b border-[#ECEBF3] pb-3">
-              <h3 className="font-display text-base font-bold text-[#24243A]">
-                Password Reset Help
-              </h3>
-              <button
-                type="button"
-                onClick={() => setForgotOpen(false)}
-                className="p-1 rounded-lg text-[#85859B] hover:text-[#24243A]"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <p className="text-xs text-[#85859B] leading-relaxed">
-              Faculty passwords are managed by your institution&apos;s EduNova Administrator under{' '}
-              <span className="font-semibold text-[#24243A]">User Management</span>. For demo access,
-              use either quick-login preset below:
-            </p>
-            <div className="rounded-xl bg-[#F7F7FC] border border-[#ECEBF3] p-3 text-xs font-mono space-y-1">
-              <p>Admin: admin@acadledger.edu / Admin@2026</p>
-              <p>Teacher: teacher@acadledger.edu / Teacher@2026</p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setForgotOpen(false)}
-              className="w-full rounded-xl bg-[#7357E8] px-4 py-2 text-xs font-semibold text-white hover:bg-[#4935A8]"
-            >
-              Got it
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

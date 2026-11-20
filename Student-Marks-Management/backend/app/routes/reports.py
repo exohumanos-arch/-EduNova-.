@@ -128,7 +128,7 @@ async def import_marks(
 
 
 @router.get("/api/export/students", response_class=PlainTextResponse)
-def export_students(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def export_students(db: Session = Depends(get_db), _: User = Depends(require_admin)):
     rows = [
         {
             "roll_no": s.roll_no,
