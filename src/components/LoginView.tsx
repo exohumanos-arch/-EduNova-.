@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   Award,
@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { api } from '../services/api';
 import type { AuthUser } from '../types';
+import { getErrorMessage } from '../utils/errorMessage';
 import { CodeLogin } from './CodeLogin';
 import { EduNovaLogo } from './EduNovaLogo';
 import { RoleSelection } from './RoleSelection';
@@ -54,27 +55,74 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const [selectedRole, setSelectedRole] = useState<'admin' | 'teacher' | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const submitGuardRef = useRef(false);
+  const redirectTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (redirectTimerRef.current !== null) {
+        window.clearTimeout(redirectTimerRef.current);
+      }
+    };
+  }, []);
+
+  const clearFeedback = () => {
+    setError(null);
+    setSuccessMessage(null);
+  };
 
   const handleSelectRole = (role: 'admin' | 'teacher') => {
+    if (redirectTimerRef.current !== null) {
+      window.clearTimeout(redirectTimerRef.current);
+      redirectTimerRef.current = null;
+    }
     setSelectedRole(role);
-    setError(null);
+    clearFeedback();
   };
 
   const handleCodeSubmit = async (accessCode: string) => {
-    if (!selectedRole) return;
-    setError(null);
+    if (!selectedRole || submitGuardRef.current) return;
+    const trimmed = accessCode.trim();
+    const roleLabel = selectedRole === 'admin' ? 'Admin' : 'Teacher';
+
+    if (!trimmed) {
+      setSuccessMessage(null);
+      setError(`Please enter your ${roleLabel} access code.`);
+      return;
+    }
+
+    if (redirectTimerRef.current !== null) {
+      window.clearTimeout(redirectTimerRef.current);
+      redirectTimerRef.current = null;
+    }
+
+    submitGuardRef.current = true;
+    clearFeedback();
     setLoading(true);
+
     try {
       const authenticatedUser = onLogin
-        ? await onLogin(selectedRole, accessCode)
-        : (await api.codeLogin(selectedRole, accessCode)).user;
-      onSuccess?.(authenticatedUser);
-    } catch (err: any) {
-      setError(err?.message || 'Invalid access code. Please try again.');
-    } finally {
+        ? await onLogin(selectedRole, trimmed)
+        : (await api.codeLogin(selectedRole, trimmed)).user;
+
+      setSuccessMessage('Login successful');
       setLoading(false);
+      redirectTimerRef.current = window.setTimeout(() => {
+        redirectTimerRef.current = null;
+        submitGuardRef.current = false;
+        onSuccess?.(authenticatedUser);
+      }, 180);
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, `Invalid ${roleLabel} Access Code`));
+      setLoading(false);
+      submitGuardRef.current = false;
     }
   };
+
+  const safeExpiredMessage = sessionExpiredMessage
+    ? getErrorMessage(sessionExpiredMessage, 'Your session has expired. Please select your role to continue.')
+    : null;
 
   return (
     <div className="min-h-screen grid lg:grid-cols-12 bg-[#F7F7FC] text-[#24243A]">
@@ -152,13 +200,13 @@ export const LoginView: React.FC<LoginViewProps> = ({
             </p>
           </div>
 
-          {sessionExpiredMessage && (
+          {safeExpiredMessage && (
             <div
               role="status"
               className="mb-5 flex items-start gap-2 rounded-xl border border-[#F4A340]/40 bg-[#FFF4E4] p-3 text-xs text-[#B56E10]"
             >
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-              <span>{sessionExpiredMessage}</span>
+              <span>{safeExpiredMessage}</span>
             </div>
           )}
 
@@ -174,6 +222,8 @@ export const LoginView: React.FC<LoginViewProps> = ({
               onSubmit={handleCodeSubmit}
               loading={loading}
               error={error}
+              successMessage={successMessage}
+              onClearFeedback={clearFeedback}
             />
           ) : (
             <div className="mt-6 pt-5 border-t border-[#ECEBF3] text-center">

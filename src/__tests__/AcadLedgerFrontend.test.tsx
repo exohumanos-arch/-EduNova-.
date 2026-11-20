@@ -16,7 +16,7 @@ import { MarksPage } from '../pages/MarksPage';
 import { ResultsPage } from '../pages/ResultsPage';
 import { DashboardPage } from '../pages/DashboardPage';
 import { GradesPage } from '../pages/GradesPage';
-import { api } from '../services/api';
+import { api, getErrorMessage, http } from '../services/api';
 import type {
   AuthUser,
   DashboardPayload,
@@ -216,8 +216,14 @@ describe('EduNova Frontend Suite', () => {
   it('renders RoleSelection + CodeLogin on LoginView, toggles code visibility, and handles valid/invalid codes', async () => {
     const onSuccess = vi.fn();
     vi.mocked(api.codeLogin)
-      .mockRejectedValueOnce(new Error('Invalid Admin access code'))
-      .mockResolvedValueOnce({ authenticated: true, role: 'ADMIN', user: ADMIN_USER });
+      .mockRejectedValueOnce(new Error('Invalid Admin Access Code'))
+      .mockResolvedValueOnce({
+        success: true,
+        message: 'Login successful',
+        authenticated: true,
+        role: 'ADMIN',
+        user: ADMIN_USER,
+      });
 
     render(<LoginView onSuccess={onSuccess} />);
     expect(screen.getByText('Welcome to EduNova')).toBeInTheDocument();
@@ -235,18 +241,142 @@ describe('EduNova Frontend Suite', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Hide access code' }));
     expect(codeInput.type).toBe('password');
 
-    fireEvent.change(codeInput, { target: { value: 'WRONG_CODE' } });
+    // Scenario 5: Empty access code shows validation message without calling API
     fireEvent.click(screen.getByRole('button', { name: 'Login' }));
     await waitFor(() => {
-      expect(screen.getByRole('alert')).toHaveTextContent('Invalid Admin access code');
+      expect(screen.getByRole('alert')).toHaveTextContent('Please enter your Admin access code.');
+    });
+    expect(api.codeLogin).not.toHaveBeenCalled();
+
+    // Typing clears old validation error
+    fireEvent.change(codeInput, { target: { value: 'WRONG_CODE' } });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    // Scenario 3: Incorrect Admin code shows red readable error
+    fireEvent.click(screen.getByRole('button', { name: 'Login' }));
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('Invalid Admin Access Code');
     });
 
+    // Scenario 1: Correct Admin code shows green success banner then invokes onSuccess
     fireEvent.change(codeInput, { target: { value: 'VALID_ADMIN_CODE' } });
     fireEvent.click(screen.getByRole('button', { name: 'Login' }));
     await waitFor(() => {
       expect(api.codeLogin).toHaveBeenLastCalledWith('admin', 'VALID_ADMIN_CODE');
+      expect(screen.getByRole('status')).toHaveTextContent('Login successful');
+    });
+    await waitFor(() => {
       expect(onSuccess).toHaveBeenCalledWith(ADMIN_USER);
     });
+  });
+
+  it('handles Teacher login, incorrect Teacher code, loading/duplicate guard, network errors, and expired session banner', async () => {
+    const onSuccess = vi.fn();
+    let resolvePendingLogin: ((val: Awaited<ReturnType<typeof api.codeLogin>>) => void) | undefined;
+    const pendingPromise = new Promise<Awaited<ReturnType<typeof api.codeLogin>>>((resolve) => {
+      resolvePendingLogin = resolve;
+    });
+
+    vi.mocked(api.codeLogin)
+      .mockRejectedValueOnce(new Error('Invalid Teacher Access Code'))
+      .mockRejectedValueOnce({ code: 'ERR_NETWORK', message: 'Network Error' })
+      .mockReturnValueOnce(pendingPromise);
+
+    render(
+      <LoginView
+        onSuccess={onSuccess}
+        sessionExpiredMessage="Your session has expired. Please select your role to continue."
+      />
+    );
+
+    // Scenario 8: Expired session notification visible
+    expect(
+      screen.getByText('Your session has expired. Please select your role to continue.')
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Teacher/i }));
+    const codeInput = screen.getByLabelText('Teacher Access Code') as HTMLInputElement;
+
+    // Scenario 4: Incorrect Teacher code
+    fireEvent.change(codeInput, { target: { value: 'BAD_TEACHER' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Login' }));
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('Invalid Teacher Access Code');
+    });
+
+    // Scenario 7: Backend server unavailable (network error)
+    fireEvent.change(codeInput, { target: { value: 'ANY_CODE' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Login' }));
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(/Unable to connect to the server/i);
+      expect(screen.getByRole('alert').textContent).not.toContain('[object Object]');
+    });
+
+    // Scenario 2 + loading/duplicate-request guard: Correct Teacher code
+    fireEvent.change(codeInput, { target: { value: 'VALID_TEACHER_CODE' } });
+    const loginBtn = screen.getByRole('button', { name: 'Login' });
+    fireEvent.click(loginBtn);
+    fireEvent.click(loginBtn);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Verifying Code/i })).toBeDisabled();
+    });
+    expect(api.codeLogin).toHaveBeenCalledTimes(3);
+
+    resolvePendingLogin?.({
+      success: true,
+      message: 'Login successful',
+      authenticated: true,
+      role: 'TEACHER',
+      user: TEACHER_USER,
+    });
+
+    await waitFor(() => {
+      expect(onSuccess).toHaveBeenCalledWith(TEACHER_USER);
+    });
+  });
+
+  it('extracts readable strings via getErrorMessage and validates invalid API responses without [object Object]', async () => {
+    // FastAPI Pydantic 422 array detail
+    expect(
+      getErrorMessage({
+        response: {
+          status: 422,
+          data: {
+            detail: [{ loc: ['body', 'access_code'], msg: 'Field required', type: 'missing' }],
+          },
+        },
+      })
+    ).toBe('access_code: Field required');
+
+    // Nested object detail / message
+    expect(
+      getErrorMessage({
+        response: { status: 400, data: { detail: { message: 'Access code format invalid' } } },
+      })
+    ).toBe('Access code format invalid');
+
+    // Empty object or literal "[object Object]" never leaks "[object Object]"
+    expect(getErrorMessage({})).toBe('Something went wrong. Please try again.');
+    expect(getErrorMessage('[object Object]')).toBe('Something went wrong. Please try again.');
+    expect(getErrorMessage('<!doctype html><html><body>502</body></html>')).toMatch(
+      /unexpected response/i
+    );
+
+    // Scenario 6: Invalid API response caught by real api.codeLogin
+    const actualMod = await vi.importActual<typeof import('../services/api')>('../services/api');
+    const postSpy = vi
+      .spyOn(http, 'post')
+      .mockResolvedValueOnce({ data: '<html>502 Bad Gateway</html>' })
+      .mockResolvedValueOnce({ data: { success: false, message: 'Invalid Teacher Access Code' } });
+
+    await expect(actualMod.api.codeLogin('admin', 'TEST')).rejects.toThrow(
+      /invalid response from the authentication server/i
+    );
+    await expect(actualMod.api.codeLogin('teacher', 'TEST')).rejects.toThrow(
+      'Invalid Teacher Access Code'
+    );
+    postSpy.mockRestore();
   });
 
   it('AuthContext restores cookie session, logs in via code, and clears session on logout', async () => {

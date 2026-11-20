@@ -6,8 +6,10 @@ Marks, Results, Dashboard Analytics, and CSV File Processing.
 
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.database import init_db, verify_connection
 from app.routes import (
@@ -33,6 +35,41 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_request: Request, exc: HTTPException):
+    detail = exc.detail
+    if isinstance(detail, str):
+        message = detail
+    elif isinstance(detail, dict) and isinstance(detail.get("message"), str):
+        message = detail["message"]
+    elif isinstance(detail, list):
+        message = ", ".join(
+            item.get("msg", str(item)) if isinstance(item, dict) else str(item)
+            for item in detail
+        )
+    else:
+        message = "Request failed"
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"success": False, "message": message, "detail": detail},
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(_request: Request, exc: RequestValidationError):
+    parts = []
+    for err in exc.errors():
+        loc = ".".join(str(x) for x in err.get("loc", []) if x != "body")
+        msg = err.get("msg", "Invalid value")
+        parts.append(f"{loc}: {msg}" if loc else str(msg))
+    message = ", ".join(parts) if parts else "Invalid request payload"
+    return JSONResponse(
+        status_code=422,
+        content={"success": False, "message": message, "detail": exc.errors()},
+    )
 
 
 @app.on_event("startup")

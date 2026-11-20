@@ -14,7 +14,6 @@ import {
   MessageSquare,
   Code2,
   Settings,
-  LogOut,
   X,
 } from 'lucide-react';
 import type { AuthUser } from '../types';
@@ -25,7 +24,6 @@ export interface NavRouteItem {
   to: string;
   label: string;
   icon: React.FC<{ className?: string }>;
-  adminOnly?: boolean;
 }
 
 export const SIDEBAR_NAV_ITEMS: NavRouteItem[] = [
@@ -41,27 +39,21 @@ export const SIDEBAR_NAV_ITEMS: NavRouteItem[] = [
   { to: '/observatory-3d', label: '3D Observatory', icon: Box },
   { to: '/ai-advisor', label: 'AI Advisor', icon: MessageSquare },
   { to: '/python-inspector', label: 'Python Inspector', icon: Code2 },
-  { to: '/settings', label: 'Settings', icon: Settings, adminOnly: true },
+  { to: '/settings', label: 'Settings', icon: Settings },
 ];
 
 interface SidebarProps {
   user: AuthUser;
   mobileMenuOpen: boolean;
   onCloseMobile: () => void;
-  onLogout: () => void;
+  onLogout?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
   user,
   mobileMenuOpen,
   onCloseMobile,
-  onLogout,
 }) => {
-  const visibleItems = SIDEBAR_NAV_ITEMS.filter(
-    (item) => !item.adminOnly || user.role === 'ADMIN'
-  );
-  const roleLabel = user.role === 'ADMIN' ? 'Admin' : 'Teacher';
-
   return (
     <>
       {mobileMenuOpen && (
@@ -89,7 +81,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
 
         <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
-          {visibleItems.map((item) => {
+          {SIDEBAR_NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             return (
               <NavLink
@@ -111,22 +103,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
           })}
         </nav>
 
-        <div className="p-4 border-t border-[#ECEBF3] shrink-0 space-y-3">
+        <div className="p-4 border-t border-[#ECEBF3] shrink-0">
           <div className="flex items-center gap-3">
             <StudentAvatar name={user.username} size="md" />
             <div className="min-w-0">
-              <p className="text-sm font-semibold text-[#24243A] truncate">{user.username}</p>
-              <p className="text-xs text-[#7357E8] font-semibold truncate">{roleLabel} Portal</p>
+              <p className="text-sm font-semibold text-[#24243A] truncate">EduNova</p>
+              <p className="text-xs text-[#7357E8] font-semibold truncate">Academic Workspace</p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={onLogout}
-            className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-[#ECEBF3] bg-[#F7F7FC] px-3 py-2 text-xs font-semibold text-[#24243A] hover:bg-[#EEE9FF] hover:text-[#4935A8] transition-colors"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            Logout
-          </button>
         </div>
       </aside>
     </>

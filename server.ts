@@ -560,11 +560,12 @@ async function startServer() {
     const accessCode = typeof req.body?.access_code === 'string' ? req.body.access_code.trim() : '';
 
     if (rawRole !== 'ADMIN' && rawRole !== 'TEACHER') {
-      res.status(400).json({ error: 'Role must be either admin or teacher' });
+      res.status(400).json({ success: false, message: 'Role must be either admin or teacher' });
       return;
     }
+    const roleLabel = rawRole === 'ADMIN' ? 'Admin' : 'Teacher';
     if (!accessCode) {
-      res.status(400).json({ error: 'Access code is required' });
+      res.status(400).json({ success: false, message: `${roleLabel} access code is required` });
       return;
     }
 
@@ -573,7 +574,8 @@ async function startServer() {
     if (!limitStatus.allowed) {
       res.setHeader('Retry-After', String(limitStatus.retryAfterSec));
       res.status(429).json({
-        error: `Too many failed login attempts. Please try again in ${limitStatus.retryAfterSec}s.`,
+        success: false,
+        message: `Too many failed login attempts. Please try again in ${limitStatus.retryAfterSec}s.`,
       });
       return;
     }
@@ -587,12 +589,14 @@ async function startServer() {
       if (attempt.locked) {
         res.setHeader('Retry-After', String(attempt.retryAfterSec));
         res.status(429).json({
-          error: `Too many failed login attempts. Please try again in ${attempt.retryAfterSec}s.`,
+          success: false,
+          message: `Too many failed login attempts. Please try again in ${attempt.retryAfterSec}s.`,
         });
         return;
       }
       res.status(401).json({
-        error: `Invalid ${rawRole === 'ADMIN' ? 'Admin' : 'Teacher'} access code`,
+        success: false,
+        message: `Invalid ${roleLabel} Access Code`,
       });
       return;
     }
@@ -618,8 +622,10 @@ async function startServer() {
     };
 
     res.json({
+      success: true,
+      message: 'Login successful',
       authenticated: true,
-      role: rawRole,
+      role: rawRole.toLowerCase(),
       user: userPayload,
       session_token: signedCookieToken,
       expires_at: new Date(expiresAt).toISOString(),

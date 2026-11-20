@@ -49,12 +49,31 @@ def test_unauthorized_requests_blocked(client: TestClient):
 
 
 def test_wrong_access_codes_rejected_and_rate_limited(client: TestClient):
+    empty_code = client.post(
+        "/api/auth/code-login",
+        json={"role": "admin", "access_code": "   "},
+        headers={"X-Forwarded-For": "192.0.2.9"},
+    )
+    assert empty_code.status_code == 400
+    assert empty_code.json()["success"] is False
+    assert "required" in empty_code.json()["message"].lower()
+
+    bad_payload = client.post(
+        "/api/auth/code-login",
+        json={"role": "admin"},
+        headers={"X-Forwarded-For": "192.0.2.9"},
+    )
+    assert bad_payload.status_code == 422
+    assert bad_payload.json()["success"] is False
+    assert isinstance(bad_payload.json()["message"], str)
+
     bad_admin = client.post(
         "/api/auth/code-login",
         json={"role": "admin", "access_code": "WRONG_ADMIN"},
         headers={"X-Forwarded-For": "192.0.2.10"},
     )
     assert bad_admin.status_code == 401
+    assert bad_admin.json() == {"success": False, "message": "Invalid Admin Access Code"}
 
     bad_teacher = client.post(
         "/api/auth/code-login",
@@ -62,6 +81,7 @@ def test_wrong_access_codes_rejected_and_rate_limited(client: TestClient):
         headers={"X-Forwarded-For": "192.0.2.11"},
     )
     assert bad_teacher.status_code == 401
+    assert bad_teacher.json() == {"success": False, "message": "Invalid Teacher Access Code"}
 
     for _ in range(4):
         r = client.post(
@@ -76,6 +96,7 @@ def test_wrong_access_codes_rejected_and_rate_limited(client: TestClient):
         headers={"X-Forwarded-For": "192.0.2.99"},
     )
     assert r5.status_code == 429
+    assert r5.json()["success"] is False
 
 
 def test_two_role_auth_rbac_crud_and_session_lifecycle(client: TestClient):
@@ -89,7 +110,10 @@ def test_two_role_auth_rbac_crud_and_session_lifecycle(client: TestClient):
         headers={"X-Forwarded-For": "192.0.2.20"},
     )
     assert r_teacher.status_code == 200
-    assert r_teacher.json()["role"] == "TEACHER"
+    assert r_teacher.json()["success"] is True
+    assert r_teacher.json()["message"] == "Login successful"
+    assert r_teacher.json()["role"] == "teacher"
+    assert r_teacher.json()["user"]["role"] == "TEACHER"
     assert "edunova_session" in r_teacher.cookies
     assert r_teacher.json().get("session_token")
 
@@ -124,7 +148,10 @@ def test_two_role_auth_rbac_crud_and_session_lifecycle(client: TestClient):
         headers={"X-Forwarded-For": "192.0.2.21"},
     )
     assert r_admin.status_code == 200
-    assert r_admin.json()["role"] == "ADMIN"
+    assert r_admin.json()["success"] is True
+    assert r_admin.json()["message"] == "Login successful"
+    assert r_admin.json()["role"] == "admin"
+    assert r_admin.json()["user"]["role"] == "ADMIN"
     admin_token = r_admin.json()["session_token"]
 
     s_res = client.post(

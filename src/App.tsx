@@ -282,7 +282,7 @@ const WorkspaceShell: React.FC<WorkspaceShellProps> = ({
 
 const AppRoutes: React.FC = () => {
   const navigate = useNavigate();
-  const { user, authChecking, sessionExpiredMessage, loginWithCode, logout } = useAuth();
+  const { user, authChecking, sessionExpiredMessage, loginWithCode, commitUser, logout } = useAuth();
 
   const [examinations, setExaminations] = useState<Examination[]>([]);
   const [selectedExamId, setSelectedExamId] = useState<number>(2);
@@ -349,9 +349,12 @@ const AppRoutes: React.FC = () => {
               <Navigate to="/dashboard" replace />
             ) : (
               <LoginView
-                onLogin={loginWithCode}
+                onLogin={(role, accessCode) => loginWithCode(role, accessCode, false)}
                 sessionExpiredMessage={sessionExpiredMessage}
-                onSuccess={() => navigate('/dashboard', { replace: true })}
+                onSuccess={(authenticatedUser) => {
+                  commitUser(authenticatedUser);
+                  navigate('/dashboard', { replace: true });
+                }}
               />
             )
           }

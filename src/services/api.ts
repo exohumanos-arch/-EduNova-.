@@ -11,6 +11,9 @@ import type {
   StudentResult,
   Subject,
 } from '../types';
+import { getErrorMessage } from '../utils/errorMessage';
+
+export { getErrorMessage };
 
 const SESSION_TOKEN_KEY = 'edunova_session_token';
 
@@ -74,12 +77,8 @@ http.interceptors.response.use(
         unauthorizedHandler();
       }
     }
-    const msg =
-      error?.response?.data?.error ||
-      error?.response?.data?.detail ||
-      error?.message ||
-      'Network request failed';
-    return Promise.reject(new Error(String(msg)));
+    const msg = getErrorMessage(error, 'Network request failed');
+    return Promise.reject(new Error(msg));
   }
 );
 
@@ -96,20 +95,76 @@ function triggerBlobDownload(blob: Blob, filename: string) {
 
 export const api = {
   // Role-Based Access Code Auth (HttpOnly Cookie + Server-Tracked Session Token)
-  codeLogin: async (role: 'admin' | 'teacher', access_code: string) => {
-    const data = (
-      await http.post<{
-        authenticated: boolean;
-        role: 'ADMIN' | 'TEACHER';
-        user: AuthUser;
-        session_token?: string;
-        expires_at?: string;
-      }>('/api/auth/code-login', { role, access_code })
-    ).data;
+  codeLogin: async (
+    role: 'admin' | 'teacher',
+    access_code: string
+  ): Promise<{
+    success: boolean;
+    message: string;
+    authenticated: boolean;
+    role: 'ADMIN' | 'TEACHER';
+    user: AuthUser;
+    session_token?: string;
+    expires_at?: string;
+  }> => {
+    const res = await http.post<{
+      success?: boolean;
+      message?: string;
+      authenticated?: boolean;
+      role?: string;
+      user?: Partial<AuthUser>;
+      session_token?: string;
+      expires_at?: string;
+      detail?: unknown;
+      error?: unknown;
+    }>('/api/auth/code-login', { role, access_code });
+
+    const data = res?.data;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new Error('Received an invalid response from the authentication server.');
+    }
+
+    if (data.success === false) {
+      throw new Error(getErrorMessage(data, 'Invalid access code. Please try again.'));
+    }
+
+    const rawRole = String(data.user?.role ?? data.role ?? '').trim().toUpperCase();
+    if (rawRole !== 'ADMIN' && rawRole !== 'TEACHER') {
+      throw new Error('Received an invalid authentication response from the server.');
+    }
+
+    if (data.authenticated === false) {
+      throw new Error(getErrorMessage(data, 'Authentication was not completed. Please try again.'));
+    }
+
+    const normalizedRole: 'ADMIN' | 'TEACHER' = rawRole;
+    const user: AuthUser = {
+      id: typeof data.user?.id === 'number' ? data.user.id : normalizedRole === 'ADMIN' ? 1 : 2,
+      username:
+        typeof data.user?.username === 'string' && data.user.username.trim()
+          ? data.user.username.trim()
+          : normalizedRole === 'ADMIN'
+          ? 'Administrator'
+          : 'Teacher',
+      role: normalizedRole,
+    };
+
     if (data.session_token) {
       setStoredSessionToken(data.session_token);
     }
-    return data;
+
+    return {
+      success: true,
+      message:
+        typeof data.message === 'string' && data.message.trim()
+          ? data.message.trim()
+          : 'Login successful',
+      authenticated: true,
+      role: normalizedRole,
+      user,
+      session_token: data.session_token,
+      expires_at: data.expires_at,
+    };
   },
   logout: async () => {
     try {

@@ -240,6 +240,9 @@ def require_admin(user: SessionPrincipal = Depends(get_current_user)) -> Session
     return user
 
 
+from fastapi.responses import JSONResponse
+
+
 @router.post("/api/auth/code-login")
 def code_login(
     req: CodeLoginRequest,
@@ -249,18 +252,28 @@ def code_login(
 ):
     normalized_role = req.role.strip().upper()
     if normalized_role not in ("ADMIN", "TEACHER"):
-        raise HTTPException(status_code=400, detail="Role must be either admin or teacher")
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "Role must be either admin or teacher"},
+        )
 
+    label = "Admin" if normalized_role == "ADMIN" else "Teacher"
     access_code = req.access_code.strip()
     if not access_code:
-        raise HTTPException(status_code=400, detail="Access code is required")
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": f"{label} access code is required"},
+        )
 
     rate_key = f"{_client_ip(request)}:{normalized_role}"
     retry_after = _check_rate_limit(rate_key)
     if retry_after is not None:
-        raise HTTPException(
+        return JSONResponse(
             status_code=429,
-            detail=f"Too many failed login attempts. Try again in {retry_after}s.",
+            content={
+                "success": False,
+                "message": f"Too many failed login attempts. Try again in {retry_after}s.",
+            },
             headers={"Retry-After": str(retry_after)},
         )
 
@@ -268,13 +281,18 @@ def code_login(
     if not _verify_access_code(access_code, stored_hash):
         locked_after = _record_failed_attempt(rate_key)
         if locked_after is not None:
-            raise HTTPException(
+            return JSONResponse(
                 status_code=429,
-                detail=f"Too many failed login attempts. Try again in {locked_after}s.",
+                content={
+                    "success": False,
+                    "message": f"Too many failed login attempts. Try again in {locked_after}s.",
+                },
                 headers={"Retry-After": str(locked_after)},
             )
-        label = "Admin" if normalized_role == "ADMIN" else "Teacher"
-        raise HTTPException(status_code=401, detail=f"Invalid {label} access code")
+        return JSONResponse(
+            status_code=401,
+            content={"success": False, "message": f"Invalid {label} Access Code"},
+        )
 
     _login_attempts.pop(rate_key, None)
 
@@ -299,8 +317,10 @@ def code_login(
     _set_session_cookie(request, response, token, SESSION_TTL_SECONDS)
 
     return {
+        "success": True,
+        "message": "Login successful",
         "authenticated": True,
-        "role": normalized_role,
+        "role": normalized_role.lower(),
         "user": {"id": 1 if normalized_role == "ADMIN" else 2, "username": username, "role": normalized_role},
         "session_token": token,
         "expires_at": expires_ms,

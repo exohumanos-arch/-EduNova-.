@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { api, setStoredSessionToken, setUnauthorizedHandler } from '../services/api';
+import { api, getErrorMessage, setStoredSessionToken, setUnauthorizedHandler } from '../services/api';
 
 /**
  * @typedef {import('../types').AuthUser} AuthUser
@@ -11,7 +11,8 @@ import { api, setStoredSessionToken, setUnauthorizedHandler } from '../services/
  *   isTeacher: boolean,
  *   authChecking: boolean,
  *   sessionExpiredMessage: string | null,
- *   loginWithCode: (role: 'admin' | 'teacher', accessCode: string) => Promise<AuthUser>,
+ *   loginWithCode: (role: 'admin' | 'teacher', accessCode: string, autoCommit?: boolean) => Promise<AuthUser>,
+ *   commitUser: (nextUser: AuthUser) => void,
  *   logout: () => Promise<void>,
  *   refreshSession: () => Promise<any>,
  *   clearExpiredMessage: () => void,
@@ -67,15 +68,33 @@ export const AuthProvider = ({ children }) => {
   }, []);
 
   /**
+   * @param {AuthUser} nextUser
+   */
+  const commitUser = useCallback((nextUser) => {
+    setUser(nextUser);
+    setSessionExpiredMessage(null);
+  }, []);
+
+  /**
    * @param {'admin' | 'teacher'} role
    * @param {string} accessCode
+   * @param {boolean} [autoCommit=true]
    * @returns {Promise<AuthUser>}
    */
-  const loginWithCode = useCallback(async (role, accessCode) => {
-    const res = await api.codeLogin(role, accessCode);
-    setUser(res.user);
-    setSessionExpiredMessage(null);
-    return res.user;
+  const loginWithCode = useCallback(async (role, accessCode, autoCommit = true) => {
+    try {
+      const res = await api.codeLogin(role, accessCode);
+      if (!res || !res.user || (res.user.role !== 'ADMIN' && res.user.role !== 'TEACHER')) {
+        throw new Error('Received an invalid authentication response from the server.');
+      }
+      if (autoCommit) {
+        setUser(res.user);
+        setSessionExpiredMessage(null);
+      }
+      return res.user;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, 'Invalid access code. Please try again.'));
+    }
   }, []);
 
   const logout = useCallback(async () => {
@@ -110,6 +129,7 @@ export const AuthProvider = ({ children }) => {
     authChecking,
     sessionExpiredMessage,
     loginWithCode,
+    commitUser,
     logout,
     refreshSession,
     clearExpiredMessage,

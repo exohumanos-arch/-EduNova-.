@@ -75,8 +75,18 @@ async function run() {
     assert.equal((await anon.request('/api/dashboard')).status, 401);
   });
 
-  // 2. Incorrect Admin and Teacher codes return 401 error
-  await check('Rejects incorrect Admin and Teacher access codes with 401', async () => {
+  // 2. Empty and incorrect Admin/Teacher codes return standardized { success: false, message } errors
+  await check('Rejects empty and incorrect Admin and Teacher access codes with standardized JSON', async () => {
+    const emptyCode = createSessionClient('10.10.1.1');
+    const r0 = await emptyCode.request('/api/auth/code-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'admin', access_code: '   ' }),
+    });
+    assert.equal(r0.status, 400);
+    assert.equal(r0.body.success, false);
+    assert.match(r0.body.message, /Admin access code is required/i);
+
     const badAdmin = createSessionClient('10.10.1.2');
     const r1 = await badAdmin.request('/api/auth/code-login', {
       method: 'POST',
@@ -84,7 +94,8 @@ async function run() {
       body: JSON.stringify({ role: 'admin', access_code: 'WRONG_ADMIN_CODE' }),
     });
     assert.equal(r1.status, 401);
-    assert.match(r1.body.error, /Invalid Admin access code/i);
+    assert.equal(r1.body.success, false);
+    assert.equal(r1.body.message, 'Invalid Admin Access Code');
 
     const badTeacher = createSessionClient('10.10.1.3');
     const r2 = await badTeacher.request('/api/auth/code-login', {
@@ -93,7 +104,8 @@ async function run() {
       body: JSON.stringify({ role: 'teacher', access_code: 'WRONG_TEACHER_CODE' }),
     });
     assert.equal(r2.status, 401);
-    assert.match(r2.body.error, /Invalid Teacher access code/i);
+    assert.equal(r2.body.success, false);
+    assert.equal(r2.body.message, 'Invalid Teacher Access Code');
   });
 
   // 3. Correct Admin & Teacher codes create HttpOnly + Partitioned cookie AND Bearer session_token (iframe-safe)
@@ -106,8 +118,11 @@ async function run() {
       body: JSON.stringify({ role: 'admin', access_code: ADMIN_CODE }),
     });
     assert.equal(adm.status, 200);
+    assert.equal(adm.body.success, true);
+    assert.equal(adm.body.message, 'Login successful');
     assert.equal(adm.body.authenticated, true);
-    assert.equal(adm.body.role, 'ADMIN');
+    assert.equal(adm.body.role, 'admin');
+    assert.equal(adm.body.user?.role, 'ADMIN');
     assert.ok(adm.body.session_token);
     assert.ok(
       adm.setCookies.some(
@@ -139,8 +154,11 @@ async function run() {
       body: JSON.stringify({ role: 'teacher', access_code: TEACHER_CODE }),
     });
     assert.equal(tch.status, 200);
+    assert.equal(tch.body.success, true);
+    assert.equal(tch.body.message, 'Login successful');
     assert.equal(tch.body.authenticated, true);
-    assert.equal(tch.body.role, 'TEACHER');
+    assert.equal(tch.body.role, 'teacher');
+    assert.equal(tch.body.user?.role, 'TEACHER');
     assert.ok(tch.body.session_token);
     assert.ok(tch.setCookies.some((c) => c.includes('edunova_session=') && c.includes('HttpOnly')));
 
